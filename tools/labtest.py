@@ -1,4 +1,4 @@
-"""Prueba del proxy en el laboratorio DVSwitch de micro2 (lab1/lab2, TG 5020 del master privado)."""
+"""Prueba del proxy en un laboratorio DVSwitch (lab1/lab2, TG 5020 de un master HBlink de pruebas)."""
 import math, socket, struct, sys, threading, time
 sys.path.insert(0, sys.argv[1] if len(sys.argv) > 1 else ".")
 from hamcid import burst

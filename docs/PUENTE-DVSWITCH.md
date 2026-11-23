@@ -1,7 +1,7 @@
 # Puente ASL ↔ DMR con DVSwitch: lo que permite hoy (medido 23-nov-2026)
 
-Laboratorio en micro2: dos pares DVSwitch (`lab1` → peer 50051 / pasarela 50002,
-`lab2` → peer 50052 / pasarela 50003) contra el master privado HBlink4 de micro1,
+Laboratorio: dos pares DVSwitch (`lab1` → peer 50051 / pasarela 50002,
+`lab2` → peer 50052 / pasarela 50003) contra un master HBlink4 de pruebas,
 TG 5020 (sin uso). Un script hace de ASL en los dos extremos por USRP.
 Analog_Bridge 1.6.4 + MMDVM_Bridge 1.6.8.
 
@@ -60,7 +60,7 @@ python3 -m hamcid.usrp_proxy --listen-asl IP:P --asl IP:P --listen-ab IP:P --ab 
         --ab-tlv IP:P --gateway-id N --tg N [--ts 2] [--delay 300] [--level 0.25]
 ```
 
-Solo biblioteca estándar (micro2 no tiene numpy). ~25 MB de RAM, CPU despreciable.
+Solo biblioteca estándar (pensado también para máquinas pequeñas sin numpy). ~25 MB de RAM, CPU despreciable.
 
 - Detector en flujo: busca los **20 ms de 1200 Hz** del reposo inicial (ventanas de 80 muestras
   cada 40; 0 falsos disparos en 20 s de voz simulada) y solo entonces demodula (≈3 ms).
