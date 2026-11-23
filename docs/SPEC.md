@@ -104,22 +104,35 @@ Para llevar el **indicativo en texto** (sin depender de un ID numérico) y otros
 Alternativas a estudiar: reutilizar una trama AX.25 UI (cuyo origen ya *es* un indicativo
 y que entienden Direwolf y los TNC) frente a una trama propia más corta.
 
-### 5.1.1 Trama v0 implementada (23-nov-2026)
-
-Implementada en `hamcid/burst.py` (referencia) y en Mobile ASL Client (Kotlin), compatibles
-entre sí bit a bit:
+### 5.1.1 Trama v1 (actual, 23-nov-2026)
 
 ```
-reposo mark 24 bits (20 ms) · 55 55 55 · 2D D4 · (versión<<4 | tipo) · longitud · carga · CRC-16 (BE) · 2 bits mark
+reposo mark 24 bits (20 ms) · preámbulo 0101… 16 bits · sincronismo 0x1ACFFC1D (32 bits) ·
+k ≥ 8 palabras Golay(24,12) entrelazadas por columnas
 ```
 
-- Bytes asíncronos: inicio 0, 8 bits LSB primero, parada 1. Mark 1200 Hz = 1, space 2200 Hz = 0.
-- CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF) sobre cabecera + longitud + carga.
-- Versión 0; tipo 1 = indicativo (`A–Z 0–9 / -`, ≤ 32), tipo 2 = texto (reservado).
-- «C31AG» ≈ 145 ms. Se emite al pulsar (sustituye los primeros ~150 ms del micro) y al soltar
-  (antes del *unkey*).
-- Probado: µ-law, nivel −22 dBFS con ruido, deriva de reloj ±0,5 %, dentro de voz; y **en real
-  entre dos móviles por un nodo ASL (app_rpt)** en los dos sentidos.
+- Datos antes de codificar: `versión(3)=1 | tipo(3) | longitud(6) | carga | CRC-16/CCITT-FALSE`
+  (el CRC cubre la cabecera de 12 bits como 2 bytes + la carga), rellenado a 12·k bits.
+- Golay(24,12) (g(x) = 0xC75 + paridad global) corrige 3 bits por palabra; con k ≥ 8 una pérdida
+  de 20 ms (24 bits) queda repartida en ≤ 3 bits por palabra. El receptor prueba k = 8…24 y se
+  queda con la que da CRC correcto.
+- NRZ síncrono, mark 1200 Hz = 1, space 2200 Hz = 0, 1200 baudios; el receptor sigue el reloj con
+  los cruces por cero.
+- Duración: 222 ms hasta 8 caracteres; 542 ms con 32.
+- Implementaciones idénticas muestra a muestra: `hamcid/burst.py` (referencia), Kotlin (Mobile ASL
+  Client), `c/hcid.h`. Conformidad: `vectors/` (12 vectores).
+
+Medidas (tools/channels.py, 200 ráfagas):
+
+| Canal | v0 (asíncrona, sin FEC) | **v1** |
+|---|---|---|
+| µ-law, FM 300-3000 Hz, ruido 12-20 dB, desénfasis | 100 % | **100 %** |
+| Opus 16 kbps | 43 % | **93 %** |
+| Pérdida 5 % rellena con silencio | 74 % | **83,5 %** |
+| GSM 06.10 (EchoLink), Opus 8 kbps | 0 % | 4 % / 0 % |
+
+GSM destruye cualquier FSK (BER 3-12 % incluso a 300-600 baudios): **EchoLink se cubre con sus
+propios metadatos** (indicativo validado por EchoLink, vía AMI de app_rpt), no con la ráfaga.
 
 ### 5.2 Quién la emite
 

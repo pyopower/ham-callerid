@@ -16,7 +16,10 @@
 - [x] Mobile ASL Client: emite al pulsar/soltar y descodifica lo recibido (probado OP8T ↔ ZUK por el nodo 1922)
 - [x] Voz retrasada tras la ráfaga de inicio (no se pierde voz si hablas al pulsar); fin = voz pendiente → ráfaga → unkey
 - [x] Medido OP8T ← ZUK por 1922: 22/24 ráfagas, 12/12 transmisiones identificadas
-- [ ] Robustez ante pérdida de un paquete de 20 ms: FEC + entrelazado o repetir la carga 🔶
+- [x] v1: Golay(24,12) + entrelazado + sincronismo de 32 bits; receptores rellenan huecos con silencio
+- [x] Biblioteca C (c/hcid.h) + vectores de conformidad
+- [x] EchoLink por metadatos (AMI: RPT_ALINKS + echolink dbget) en el puente; GSM no admite FSK
+- [x] Puente ASL⇄ADN en producción (alias en la voz, ráfaga hacia ASL)
 - [~] Silenciar la ráfaga en recepción: descartado de momento en la app (el usuario prefiere oírla a añadir retardo); sí en nodos/puentes
 - [ ] Probar a través de EchoLink (GSM) y de radio FM real
 - [ ] ADN PoC
