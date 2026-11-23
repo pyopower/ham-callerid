@@ -77,3 +77,15 @@ Laboratorio (lab1 ⇄ proxy, lab2 al otro lado, TG 5020):
 
 Pendiente para producción (60596 ⇄ TG 213): servicio systemd, cambio de puertos
 (AB `[USRP] address=127.0.0.1 txPort/rxPort` → proxy; ASL sigue igual), prueba con la app.
+
+## ✅ Producción de punta a punta (23-nov-2026, 19:17 UTC)
+
+Mobile ASL Client (OnePlus 8T, ráfaga activada) → nodo 60596 → 1932 → hcid-usrp-proxy →
+Analog_Bridge/MMDVM_Bridge → servidor ADN 2131 (v2.7.0, `TALKER_ALIAS_MODE: both`) → TG 213.
+
+- El intermediario reconoce la ráfaga ~0,4 s después del inicio (app_rpt manda ~200 ms antes)
+  y mete el alias en la voz a mitad de llamada.
+- Capturado lo que el servidor **reenvía** a otro sistema del TG 213 (BALIZA-MASTER):
+  supertramas `FLCO 0,0,0,4,0,5,0,4,…` → alias **`C31AG/ASL`** con ID de pasarela 2130035.
+  El servidor recoge el alias de la fuente y lo reenvía sin tocar su código.
+- DMR → ASL: ráfaga al principio y al final de cada llamada (visto con 1000001, EA5IAJ, SP8X).
