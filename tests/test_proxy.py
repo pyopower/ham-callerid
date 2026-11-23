@@ -48,7 +48,7 @@ class HbpRelayTest(unittest.TestCase):
         master.settimeout(0.5)
         bridge = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); bridge.bind(("127.0.0.1", 0))
         bridge.settimeout(0.5)
-        r = HbpRelay("127.0.0.1:0", "127.0.0.1:%d" % master.getsockname()[1], lambda: "C31AG/ASL")
+        r = HbpRelay("127.0.0.1:0", "127.0.0.1:%d" % master.getsockname()[1], lambda: "C31AG/ASL", dmra=True)
         r.run()
         relay = r.local.getsockname()
         dmrd = lambda sid: b"DMRD" + b"\x01" + bytes.fromhex("208073") + bytes.fromhex("0000d5") + b"\0\0\0\1" + b"\x00" + sid + b"\0" * 33

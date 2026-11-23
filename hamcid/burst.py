@@ -167,7 +167,7 @@ def mark_purity(x):
     """Fracción de la energía de ``x`` que es un tono de 1200 Hz (≈1 en el reposo inicial)."""
     n = len(x)
     e = sum(v * v for v in x)
-    if e < 1e-6 * n:
+    if n == 0 or e < 1e-6 * n:
         return 0.0
     return _goertzel(x, MARK) * 2 / (n * e)
 

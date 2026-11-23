@@ -8,7 +8,9 @@ ASL → DMR
     Talker Alias con el origen marcado (``C31AG/ASL``; ``ASL <nodo>`` si no hubo ráfaga): el
     dato es *declarado*, no verificado. Con ``--hbp-listen``/``--hbp-master`` el proxy hace de
     relevo HBP transparente entre MMDVM_Bridge y el master y mete el TA como paquetes ``DMRA``
-    en la sesión del peer (los servidores ADN v2 en modo ``both`` respetan el TA de la fuente).
+    en la sesión del peer: dentro de la voz (LC embebido, como una radio; vale para cualquier
+    red) y, con ``--dmra``, también como paquetes DMRA (ADN v2 en modo ``both`` respeta el TA
+    de la fuente).
     Opcional (``--real-id``): poner el ID DMR real del indicativo con un TLV ``SET_INFO``;
     pensado para cuando la ráfaga vaya firmada.
 
@@ -31,7 +33,7 @@ import struct
 import threading
 import time
 
-from hamcid import burst
+from hamcid import burst, dmr_ta
 
 FRAME = 160
 FRAME_S = 0.02
@@ -99,7 +101,7 @@ class HbpRelay:
     inyectan cuentan como del peer. ``ta_for_stream()`` da el texto para cada llamada nueva.
     """
 
-    def __init__(self, listen: str, master: str, ta_for_stream):
+    def __init__(self, listen: str, master: str, ta_for_stream, dmra: bool = False):
         self.local = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.local.bind(_addr(listen))
         self.up = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -108,6 +110,8 @@ class HbpRelay:
         self.bridge = None
         self.ta_for_stream = ta_for_stream
         self.streams = collections.OrderedDict()
+        self.injector = dmr_ta.TaInjector()
+        self.dmra = dmra
 
     def _resolve(self):
         h, p = _addr(self.master_name)
@@ -120,18 +124,24 @@ class HbpRelay:
         log.info("HBP: MMDVM_Bridge ⇄ proxy ⇄ master %s %s", self.master_name, self.master)
 
     def from_bridge(self, d: bytes, addr=None):
-        self.up.sendto(d, self.master)
+        new_text = None
         if d[:4] == b"DMRD" and len(d) >= 20:
             sid = d[16:20]
             if sid not in self.streams:
                 self.streams[sid] = True
                 while len(self.streams) > 16:
                     self.streams.popitem(last=False)
-                text = self.ta_for_stream()
-                if text:
-                    for pk in dmra_packets(d[5:8], text):
-                        self.up.sendto(pk, self.master)
-                    log.info("HBP: Talker Alias «%s» en la llamada %s", text, sid.hex())
+                new_text = self.ta_for_stream()
+                if new_text:
+                    self.injector.start(sid, new_text, d)
+            d = self.injector.process(d)          # alias también dentro de la voz (LC embebido)
+        self.up.sendto(d, self.master)
+        if new_text and self.dmra:
+            # opcional: DMRA como MMDVMHost. ¡Ojo! HBlink3/4 no lo entienden, contestan NAK y el
+            # peer se reconecta (la llamada se corta). El alias embebido en la voz basta.
+            for pk in dmra_packets(d[5:8], new_text):
+                self.up.sendto(pk, self.master)
+            log.info("HBP: Talker Alias «%s» en la llamada %s", new_text, d[16:20].hex())
 
     def from_master(self, d: bytes, addr=None):
         if self.bridge:
@@ -245,7 +255,7 @@ class Proxy:
         self.id_set = False
         self.restore_at = 0.0
         self.up_call: str | None = None       # indicativo de la ráfaga de esta transmisión
-        self.hbp = HbpRelay(a.hbp_listen, a.hbp_master, self.ta_for_stream) if a.hbp_listen else None
+        self.hbp = HbpRelay(a.hbp_listen, a.hbp_master, self.ta_for_stream, a.dmra) if a.hbp_listen else None
         # AB → ASL
         self.down_q: collections.deque = collections.deque()  # (seq, key, typ, payload)
         self.down_keyed = False
@@ -438,6 +448,8 @@ def main(argv=None):
     p.add_argument("--level", type=float, default=0.25, help="amplitud de la ráfaga hacia ASL (0-1)")
     p.add_argument("--hbp-listen", default="", help="relevo HBP: donde escucha a MMDVM_Bridge (ip:puerto)")
     p.add_argument("--hbp-master", default="", help="relevo HBP: master real (host:puerto)")
+    p.add_argument("--dmra", action="store_true", help="mandar también el alias en paquetes HBP DMRA "
+                   "(ADN/BM sí; HBlink3/4 NO: contestan NAK y cortan la llamada)")
     p.add_argument("--origin", default="ASL", help="sufijo de origen en el Talker Alias (C31AG/ASL)")
     p.add_argument("--unknown-ta", default="", help="Talker Alias si no hubo ráfaga (p. ej. 'ASL 60596')")
     p.add_argument("--real-id", action="store_true", help="poner el ID DMR real del indicativo (solo "
