@@ -27,3 +27,42 @@ class ProxyTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HbpRelayTest(unittest.TestCase):
+    def test_dmra_packets_layout(self):
+        from hamcid.usrp_proxy import dmra_packets
+        p = dmra_packets(bytes.fromhex("208073"), "C31AG/ASL")
+        self.assertEqual(len(p), 2)                       # 1 + 9 bytes -> 2 bloques de 7
+        self.assertTrue(all(len(x) == 15 and x[:4] == b"DMRA" for x in p))
+        buf = p[0][8:] + p[1][8:]
+        self.assertEqual(buf[0], (2 << 6) | (9 << 1))     # UTF-8, longitud 9
+        self.assertEqual(buf[1:10], b"C31AG/ASL")
+        self.assertEqual([x[7] for x in p], [0, 1])
+
+    def test_relay_injects_once_per_stream(self):
+        import socket
+        import time
+        from hamcid.usrp_proxy import HbpRelay
+        master = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); master.bind(("127.0.0.1", 0))
+        master.settimeout(0.5)
+        bridge = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); bridge.bind(("127.0.0.1", 0))
+        bridge.settimeout(0.5)
+        r = HbpRelay("127.0.0.1:0", "127.0.0.1:%d" % master.getsockname()[1], lambda: "C31AG/ASL")
+        r.run()
+        relay = r.local.getsockname()
+        dmrd = lambda sid: b"DMRD" + b"\x01" + bytes.fromhex("208073") + bytes.fromhex("0000d5") + b"\0\0\0\1" + b"\x00" + sid + b"\0" * 33
+        bridge.sendto(b"RPTL\0\0\0\1", relay)
+        for _ in range(3):
+            bridge.sendto(dmrd(b"\xaa\xbb\xcc\xdd"), relay)
+        got = []
+        try:
+            while True:
+                d, a = master.recvfrom(100); got.append(d[:4])
+        except socket.timeout:
+            pass
+        self.assertEqual(got.count(b"DMRD"), 3)
+        self.assertEqual(got.count(b"DMRA"), 2)          # una vez por llamada
+        self.assertEqual(got[0], b"RPTL")
+        master.sendto(b"RPTACK", a)                      # vuelta: llega a MMDVM_Bridge
+        self.assertEqual(bridge.recvfrom(100)[0], b"RPTACK")

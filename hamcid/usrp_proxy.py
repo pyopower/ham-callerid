@@ -5,8 +5,12 @@
 ASL → DMR
     El audio de ASL se retrasa ``--delay`` ms. Mientras tanto se busca la ráfaga Ham CallerID;
     si aparece, se silencia, se busca el ID DMR del indicativo y se manda a Analog_Bridge un
-    TLV ``SET_INFO`` por su puerto TLV para que la llamada salga con ese ID. Al acabar la
-    transmisión se restaura el ID de la pasarela (Analog_Bridge lo deja «pegado»).
+    Talker Alias con el origen marcado (``C31AG/ASL``; ``ASL <nodo>`` si no hubo ráfaga): el
+    dato es *declarado*, no verificado. Con ``--hbp-listen``/``--hbp-master`` el proxy hace de
+    relevo HBP transparente entre MMDVM_Bridge y el master y mete el TA como paquetes ``DMRA``
+    en la sesión del peer (los servidores ADN v2 en modo ``both`` respetan el TA de la fuente).
+    Opcional (``--real-id``): poner el ID DMR real del indicativo con un TLV ``SET_INFO``;
+    pensado para cuando la ráfaga vaya firmada.
 
 DMR → ASL
     Analog_Bridge (``exportMetadata = true``) anuncia cada llamada con un TLV ``SET_INFO``
@@ -75,6 +79,63 @@ def parse_set_info(p: bytes):
     tg = int.from_bytes(p[9:12], "big")
     call = p[14:2 + p[1]].split(b"\0", 1)[0].decode("ascii", "ignore").strip()
     return dmrid, tg, call
+
+
+def dmra_packets(rf_src: bytes, text: str) -> list[bytes]:
+    """Paquetes HBP DMRA (Talker Alias UTF-8, formato ETSI 2) como los de MMDVMHost."""
+    raw = text.encode("utf-8")[:27]
+    buf = bytearray(28)
+    buf[0] = (2 << 6) | (len(raw) << 1)
+    buf[1:1 + len(raw)] = raw
+    blocks = [bytes(buf[i * 7:(i + 1) * 7]) for i in range(4)]
+    last = max([i for i, b in enumerate(blocks) if any(b)] or [0])
+    return [b"DMRA" + rf_src[:3] + bytes([i]) + blocks[i] for i in range(last + 1)]
+
+
+class HbpRelay:
+    """Relevo HBP transparente MMDVM_Bridge ⇄ master que puede añadir paquetes DMRA.
+
+    El master ve al proxy como el peer (misma sesión, mismo puerto), así que los DMRA que se
+    inyectan cuentan como del peer. ``ta_for_stream()`` da el texto para cada llamada nueva.
+    """
+
+    def __init__(self, listen: str, master: str, ta_for_stream):
+        self.local = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.local.bind(_addr(listen))
+        self.up = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.master_name = master
+        self.master = None
+        self.bridge = None
+        self.ta_for_stream = ta_for_stream
+        self.streams = collections.OrderedDict()
+
+    def _resolve(self):
+        h, p = _addr(self.master_name)
+        self.master = (socket.gethostbyname(h), p)
+
+    def run(self):
+        self._resolve()
+        threading.Thread(target=_rx_loop, args=(self.local, self.from_bridge), daemon=True).start()
+        threading.Thread(target=_rx_loop, args=(self.up, self.from_master), daemon=True).start()
+        log.info("HBP: MMDVM_Bridge ⇄ proxy ⇄ master %s %s", self.master_name, self.master)
+
+    def from_bridge(self, d: bytes, addr=None):
+        self.up.sendto(d, self.master)
+        if d[:4] == b"DMRD" and len(d) >= 20:
+            sid = d[16:20]
+            if sid not in self.streams:
+                self.streams[sid] = True
+                while len(self.streams) > 16:
+                    self.streams.popitem(last=False)
+                text = self.ta_for_stream()
+                if text:
+                    for pk in dmra_packets(d[5:8], text):
+                        self.up.sendto(pk, self.master)
+                    log.info("HBP: Talker Alias «%s» en la llamada %s", text, sid.hex())
+
+    def from_master(self, d: bytes, addr=None):
+        if self.bridge:
+            self.local.sendto(d, self.bridge)
 
 
 # --------------------------------------------------------------------------- base de IDs
@@ -183,6 +244,8 @@ class Proxy:
         self.up_fwd_keyed = False
         self.id_set = False
         self.restore_at = 0.0
+        self.up_call: str | None = None       # indicativo de la ráfaga de esta transmisión
+        self.hbp = HbpRelay(a.hbp_listen, a.hbp_master, self.ta_for_stream) if a.hbp_listen else None
         # AB → ASL
         self.down_q: collections.deque = collections.deque()  # (seq, key, typ, payload)
         self.down_keyed = False
@@ -216,6 +279,8 @@ class Proxy:
         if key and not self.up_keyed:
             self.up_keyed = True
             self.key_frame = n
+            self.up_call = None
+            self.up_tx_at = now
             log.debug("ASL→DMR: inicio de transmisión (n=%d)", n)
         elif not key and self.up_keyed:
             self.up_keyed = False
@@ -225,7 +290,10 @@ class Proxy:
             self.up_q.append((now + self.a.delay / 1000, seq, key, typ, payload, n))
 
     def on_upstream_call(self, call: str):
-        if self.id_set:
+        if self.up_call is None:
+            self.up_call = call
+            log.info("ASL→DMR: ráfaga %s (n=%d)", call, self.frame_n)
+        if self.id_set or not self.a.real_id:
             return
         base = call.upper().split("/")[0].split("-")[0]
         if self.a.allow and base not in self.a.allow:
@@ -254,6 +322,14 @@ class Proxy:
             self.id_set = False
             self.s_tlv.sendto(set_info(self.a.gateway_id, "", self.a.tg, self.a.ts), self.ab_tlv)
             log.info("ASL→DMR: ID de pasarela %d restaurado", self.a.gateway_id)
+
+    def ta_for_stream(self) -> str | None:
+        """Talker Alias de una llamada que empieza hacia DMR (o None si no viene de ASL)."""
+        if not self.up_keyed and time.monotonic() - getattr(self, "up_tx_at", 0) > 5:
+            return None          # no es una transmisión nuestra (p. ej. eco de otra cosa)
+        if self.up_call:
+            return f"{self.up_call}/{self.a.origin}"
+        return self.a.unknown_ta or None
 
     # ---- AB → ASL -----------------------------------------------------------
     def from_ab(self, d: bytes):
@@ -310,6 +386,8 @@ class Proxy:
 
     # ---- bucle -------------------------------------------------------------
     def run(self):
+        if self.hbp:
+            self.hbp.run()
         for s, fn in ((self.s_asl, self.from_asl), (self.s_ab, self.from_ab)):
             threading.Thread(target=_rx_loop, args=(s, fn), daemon=True).start()
         log.info("ASL %s ⇄ proxy (%s | %s) ⇄ AB %s, TLV %s, pasarela %d, retardo %d ms",
@@ -331,8 +409,10 @@ def burst_call(s: str) -> str:
 
 def _rx_loop(s, fn):
     while True:
-        d, _ = s.recvfrom(4096)
+        d, addr = s.recvfrom(4096)
         try:
+            if getattr(fn, "__self__", None) is not None and isinstance(fn.__self__, HbpRelay) and fn.__name__ == "from_bridge":
+                fn.__self__.bridge = addr
             fn(d)
         except Exception:
             log.exception("paquete descartado")
@@ -356,8 +436,13 @@ def main(argv=None):
     p.add_argument("--ids", default="/var/lib/dvswitch/subscriber_ids.csv")
     p.add_argument("--delay", type=int, default=300, help="retardo ASL→DMR en ms (≥ 300)")
     p.add_argument("--level", type=float, default=0.25, help="amplitud de la ráfaga hacia ASL (0-1)")
-    p.add_argument("--allow", default="", help="indicativos (separados por comas) que pueden salir con su ID "
-                   "DMR real; vacío = todos. Los demás usan el ID de la pasarela")
+    p.add_argument("--hbp-listen", default="", help="relevo HBP: donde escucha a MMDVM_Bridge (ip:puerto)")
+    p.add_argument("--hbp-master", default="", help="relevo HBP: master real (host:puerto)")
+    p.add_argument("--origin", default="ASL", help="sufijo de origen en el Talker Alias (C31AG/ASL)")
+    p.add_argument("--unknown-ta", default="", help="Talker Alias si no hubo ráfaga (p. ej. 'ASL 60596')")
+    p.add_argument("--real-id", action="store_true", help="poner el ID DMR real del indicativo (solo "
+                   "para ráfagas verificadas; hoy sin firma: desaconsejado)")
+    p.add_argument("--allow", default="", help="con --real-id: indicativos que pueden salir con su ID real")
     p.add_argument("-v", "--verbose", action="store_true")
     a = p.parse_args(argv)
     a.allow = {c.strip().upper() for c in a.allow.split(",") if c.strip()}
