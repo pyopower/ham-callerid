@@ -112,6 +112,7 @@ class HbpRelay:
         self.streams = collections.OrderedDict()
         self.injector = dmr_ta.TaInjector()
         self.dmra = dmra
+        self.pending: tuple[bytes, bytes, float] | None = None   # (stream, rf_src, desde) esperando indicativo
 
     def _resolve(self):
         h, p = _addr(self.master_name)
@@ -132,16 +133,36 @@ class HbpRelay:
                 while len(self.streams) > 16:
                     self.streams.popitem(last=False)
                 new_text = self.ta_for_stream()
-                if new_text:
-                    self.injector.start(sid, new_text, d)
+                if new_text is not None:
+                    self.injector.start(sid, new_text or None, d)
+                    if not new_text:          # de ASL pero aún sin indicativo: se decide en marcha
+                        self.pending = (sid, d[5:8], time.monotonic())
+                        new_text = None
             d = self.injector.process(d)          # alias también dentro de la voz (LC embebido)
         self.up.sendto(d, self.master)
-        if new_text and self.dmra:
+        if new_text:
+            self._announce(d[16:20], d[5:8], new_text)
+
+    def set_alias(self, text: str, why: str):
+        """Alias para la llamada que espera indicativo (si la hay)."""
+        if not self.pending:
+            return
+        sid, rf, _ = self.pending
+        self.pending = None
+        if self.injector.set_text(sid, text):
+            self._announce(sid, rf, text, why)
+
+    def tick(self, unknown: str):
+        if self.pending and time.monotonic() - self.pending[2] > 1.5:
+            self.set_alias(unknown, "sin ráfaga") if unknown else setattr(self, "pending", None)
+
+    def _announce(self, sid: bytes, rf: bytes, text: str, why: str = ""):
+        if self.dmra:
             # opcional: DMRA como MMDVMHost. ¡Ojo! HBlink3/4 no lo entienden, contestan NAK y el
             # peer se reconecta (la llamada se corta). El alias embebido en la voz basta.
-            for pk in dmra_packets(d[5:8], new_text):
+            for pk in dmra_packets(rf, text):
                 self.up.sendto(pk, self.master)
-            log.info("HBP: Talker Alias «%s» en la llamada %s", new_text, d[16:20].hex())
+        log.info("HBP: Talker Alias «%s» en la llamada %s%s", text, sid.hex(), f" ({why})" if why else "")
 
     def from_master(self, d: bytes, addr=None):
         if self.bridge:
@@ -255,6 +276,8 @@ class Proxy:
         self.id_set = False
         self.restore_at = 0.0
         self.up_call: str | None = None       # indicativo de la ráfaga de esta transmisión
+        self.last_asl_audio = 0.0
+        self.last_asl_n = -1000
         self.hbp = HbpRelay(a.hbp_listen, a.hbp_master, self.ta_for_stream, a.dmra) if a.hbp_listen else None
         # AB → ASL
         self.down_q: collections.deque = collections.deque()  # (seq, key, typ, payload)
@@ -276,6 +299,11 @@ class Proxy:
             return
         n = self.frame_n
         self.frame_n += 1
+        if n - self.last_asl_n > 25 or now - self.last_asl_audio > 1.0:   # hueco: transmisión nueva
+            self.up_call = None
+            self.key_frame = n
+        self.last_asl_n = n
+        self.last_asl_audio = now
         x = pcm_to_floats(payload)
         if len(x) == FRAME:
             hits = self.dec.feed(x)
@@ -284,13 +312,10 @@ class Proxy:
             for call, first, last in hits:
                 self.mute.update(range(first, last + 1))
                 # solo la ráfaga del principio decide el ID (el de una llamada ya empezada no cambia)
-                if first - self.key_frame < self.a.delay // 20:
+                if first - self.key_frame < 75:   # solo una ráfaga de los primeros ~1,5 s
                     self.on_upstream_call(call)
         if key and not self.up_keyed:
             self.up_keyed = True
-            self.key_frame = n
-            self.up_call = None
-            self.up_tx_at = now
             log.debug("ASL→DMR: inicio de transmisión (n=%d)", n)
         elif not key and self.up_keyed:
             self.up_keyed = False
@@ -303,6 +328,8 @@ class Proxy:
         if self.up_call is None:
             self.up_call = call
             log.info("ASL→DMR: ráfaga %s (n=%d)", call, self.frame_n)
+            if self.hbp:
+                self.hbp.set_alias(f"{call}/{self.a.origin}", "ráfaga")
         if self.id_set or not self.a.real_id:
             return
         base = call.upper().split("/")[0].split("-")[0]
@@ -317,6 +344,8 @@ class Proxy:
 
     def pump_up(self):
         now = time.monotonic()
+        if self.hbp:
+            self.hbp.tick(self.a.unknown_ta)
         with self.lock:
             while self.up_q and self.up_q[0][0] <= now:
                 _, seq, key, typ, payload, n = self.up_q.popleft()
@@ -334,12 +363,11 @@ class Proxy:
             log.info("ASL→DMR: ID de pasarela %d restaurado", self.a.gateway_id)
 
     def ta_for_stream(self) -> str | None:
-        """Talker Alias de una llamada que empieza hacia DMR (o None si no viene de ASL)."""
-        if not self.up_keyed and time.monotonic() - getattr(self, "up_tx_at", 0) > 5:
-            return None          # no es una transmisión nuestra (p. ej. eco de otra cosa)
-        if self.up_call:
-            return f"{self.up_call}/{self.a.origin}"
-        return self.a.unknown_ta or None
+        """Alias de una llamada que empieza hacia DMR: texto, "" (de ASL, indicativo aún
+        desconocido) o None (no viene de ASL)."""
+        if time.monotonic() - self.last_asl_audio > 2.0:
+            return None
+        return f"{self.up_call}/{self.a.origin}" if self.up_call else ""
 
     # ---- AB → ASL -----------------------------------------------------------
     def from_ab(self, d: bytes):

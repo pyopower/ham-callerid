@@ -32,7 +32,8 @@ tone = lambda ms, f=700: [0.3 * math.sin(2 * math.pi * f * i / 8000) for i in ra
 B.sendto(usrp_build(0, 0, 3, b""), ("127.0.0.1", 55032)); time.sleep(0.5)
 
 print("== 1) ASL→DMR con ráfaga C31AG")
-send(A, ("127.0.0.1", 55200), burst.modulate("C31AG", amp=0.3) + tone(1500) + burst.modulate("C31AG", amp=0.3))
+# como app_rpt: ~300 ms de audio antes de la ráfaga
+send(A, ("127.0.0.1", 55200), [0.0] * 2400 + burst.modulate("C31AG", amp=0.3) + tone(2500) + burst.modulate("C31AG", amp=0.3))
 time.sleep(3)
 print("   metadatos en el otro extremo:", [p.hex()[:30] for p in rx["Bmeta"]])
 print("   ráfagas que quedan en el audio recibido:", [t for _, t, _ in burst.demodulate(rx["B"])], "(debe estar vacío: silenciadas)")
@@ -40,7 +41,7 @@ print("   audio recibido: %.1f s" % (len(rx["B"]) / 8000))
 rx["B"].clear(); rx["Bmeta"].clear(); time.sleep(2)
 
 print("== 1b) ASL→DMR sin ráfaga (debe volver al ID de pasarela)")
-send(A, ("127.0.0.1", 55200), tone(1000)); time.sleep(3)
+send(A, ("127.0.0.1", 55200), tone(2500)); time.sleep(3)
 print("   metadatos:", [p.hex()[:30] for p in rx["Bmeta"]])
 rx["B"].clear(); rx["Bmeta"].clear(); time.sleep(2)
 

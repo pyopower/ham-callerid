@@ -66,3 +66,27 @@ class HbpRelayTest(unittest.TestCase):
         self.assertEqual(got[0], b"RPTL")
         master.sendto(b"RPTACK", a)                      # vuelta: llega a MMDVM_Bridge
         self.assertEqual(bridge.recvfrom(100)[0], b"RPTACK")
+
+
+class PendingAliasTest(unittest.TestCase):
+    def test_alias_set_after_stream_started(self):
+        import socket
+        from hamcid import dmr_ta
+        from hamcid.usrp_proxy import HbpRelay
+        master = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); master.bind(("127.0.0.1", 0))
+        r = HbpRelay("127.0.0.1:0", "127.0.0.1:%d" % master.getsockname()[1], lambda: "")
+        r.master = master.getsockname()
+        sid = b"\xaa\xbb\xcc\xdd"
+        hdr = b"DMRD" + b"\x00" + bytes.fromhex("208073") + bytes.fromhex("0000d5") + b"\0\0\0\1"
+        pkt = lambda v: hdr + bytes([v]) + sid + bytes(33) + b"\0\0"
+        r.from_bridge(pkt(0x21))
+        self.assertIsNotNone(r.pending)                      # de ASL, sin indicativo todavía
+        group = dmr_ta.encode_emblc(bytes(3) + bytes.fromhex("0000d5") + bytes.fromhex("208073"))
+        self.assertEqual(dmr_ta._get_emb(r.injector.process(pkt(1))[20:53]), group[1])
+        r.set_alias("C31AG/ASL", "ráfaga")
+        self.assertIsNone(r.pending)
+        for v in range(2, 5):
+            r.injector.process(pkt(v))
+        out = [dmr_ta._get_emb(r.injector.process(pkt(v))[20:53]) for v in range(1, 5)]
+        ta = dmr_ta.encode_emblc(dmr_ta.build_ta_lcs("C31AG/ASL")[0])
+        self.assertEqual(out, [ta[v] for v in range(1, 5)])  # la supertrama siguiente ya lleva el alias

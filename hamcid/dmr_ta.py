@@ -98,18 +98,30 @@ class TaInjector:
         self.fmt = fmt
         self.streams: dict[bytes, dict] = {}
 
-    def start(self, stream_id: bytes, text: str, dmrd: bytes | None = None):
+    def start(self, stream_id: bytes, text: str | None, dmrd: bytes | None = None):
         """Programa la llamada: LC de grupo (rehecho con el TG y el origen de la trama) y el alias,
         alternando por supertramas. Se sustituyen TODAS las supertramas, para no mezclar con un
-        alias que ya trajera la fuente (MMDVM_Bridge genera el suyo propio)."""
+        alias que ya trajera la fuente (MMDVM_Bridge genera el suyo propio). Sin texto todavía
+        (``None``) solo va el LC de grupo hasta que se llame a ``set_text``."""
+        group = None
+        if dmrd is not None and len(dmrd) >= 16 and not (dmrd[15] & 0x40):   # llamada de grupo
+            lc = bytes([0x00, FID, 0x00]) + dmrd[8:11] + dmrd[5:8]
+            group = encode_emblc(lc)
+        if group is None and not text:
+            return
+        self.streams[stream_id] = {"group": group, "sched": [group], "sf": -1, "cur": None}
         if text:
-            group = None
-            if dmrd is not None and len(dmrd) >= 16 and not (dmrd[15] & 0x40):   # llamada de grupo
-                lc = bytes([0x00, FID, 0x00]) + dmrd[8:11] + dmrd[5:8]
-                group = encode_emblc(lc)
-            self.streams[stream_id] = {"sched": [group] + ta_superframes(text, self.fmt), "sf": -1, "cur": None}
+            self.set_text(stream_id, text)
         while len(self.streams) > 16:
             self.streams.pop(next(iter(self.streams)))
+
+    def set_text(self, stream_id: bytes, text: str) -> bool:
+        """Pone (o cambia) el alias de una llamada en curso; vale desde la supertrama siguiente."""
+        st = self.streams.get(stream_id)
+        if st is None:
+            return False
+        st["sched"] = [st["group"]] + ta_superframes(text, self.fmt)
+        return True
 
     def process(self, d: bytes) -> bytes:
         """Paquete DMRD completo → paquete (con el alias en las ráfagas B-E si toca)."""
