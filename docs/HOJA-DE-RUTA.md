@@ -11,9 +11,12 @@
 - [ ] Puente ADN: ID DMR real como origen + Talker Alias
 
 ## Fase 2 — ráfaga con texto
-- [ ] Decidir trama (propia vs AX.25 UI), FEC y duración
-- [ ] Generador/decodificador de referencia
-- [ ] Emisión desde Mobile ASL Client / ADN PoC al soltar PTT
+- [x] Trama v0 propia (sin FEC; CRC-16) — revisar FEC y AX.25 UI más adelante
+- [x] Generador/decodificador de referencia (`hamcid/burst.py`) + pruebas
+- [x] Mobile ASL Client: emite al pulsar/soltar y descodifica lo recibido (probado OP8T ↔ ZUK por el nodo 1922)
+- [ ] Silenciar la ráfaga en recepción (retardo + mute)
+- [ ] Probar a través de EchoLink (GSM) y de radio FM real
+- [ ] ADN PoC
 - [ ] Firmware libre (Quansheng, OpenGD77 analógico)
 
 ## Abierto

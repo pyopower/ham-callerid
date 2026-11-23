@@ -104,6 +104,23 @@ Para llevar el **indicativo en texto** (sin depender de un ID numérico) y otros
 Alternativas a estudiar: reutilizar una trama AX.25 UI (cuyo origen ya *es* un indicativo
 y que entienden Direwolf y los TNC) frente a una trama propia más corta.
 
+### 5.1.1 Trama v0 implementada (23-nov-2026)
+
+Implementada en `hamcid/burst.py` (referencia) y en Mobile ASL Client (Kotlin), compatibles
+entre sí bit a bit:
+
+```
+reposo mark 12 bits · 55 55 55 · 2D D4 · (versión<<4 | tipo) · longitud · carga · CRC-16 (BE) · 2 bits mark
+```
+
+- Bytes asíncronos: inicio 0, 8 bits LSB primero, parada 1. Mark 1200 Hz = 1, space 2200 Hz = 0.
+- CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF) sobre cabecera + longitud + carga.
+- Versión 0; tipo 1 = indicativo (`A–Z 0–9 / -`, ≤ 32), tipo 2 = texto (reservado).
+- «C31AG» ≈ 145 ms. Se emite al pulsar (sustituye los primeros ~150 ms del micro) y al soltar
+  (antes del *unkey*).
+- Probado: µ-law, nivel −22 dBFS con ruido, deriva de reloj ±0,5 %, dentro de voz; y **en real
+  entre dos móviles por un nodo ASL (app_rpt)** en los dos sentidos.
+
 ### 5.2 Quién la emite
 
 - Apps propias: Mobile ASL Client, ADN PoC, PTT LoRa (cuando transmiten audio analógico).
