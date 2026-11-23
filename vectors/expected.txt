@@ -1,0 +1,12 @@
+mod_C31AG.wav	C31AG
+mod_EA3IGD_P.wav	EA3IGD/P
+mod_XE1ABC-12.wav	XE1ABC-12
+mod_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA.wav	AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+clean_two.wav	C31AG,C31AG
+ulaw_low_level.wav	HP3ICC
+noise_12db_fm.wav	EA5GVK
+gap_20ms_silence.wav	C31AG/M
+inside_voice.wav	VA3BOC
+opus16k.wav	DL1ABC
+voice_only.wav	
+noise_only.wav	
