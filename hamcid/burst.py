@@ -1,13 +1,17 @@
-"""Ráfaga Ham CallerID v0 (fase 2): AFSK Bell 202 con el indicativo en texto.
+"""Ráfaga Ham CallerID v1: AFSK 1200 síncrona con Golay(24,12) y entrelazado.
 
-Trama (ver docs/SPEC.md §5):
+    reposo mark 24 bits (20 ms) · preámbulo 0101… 16 bits · sincronismo 0x1ACFFC1D (32 bits) ·
+    bloque codificado: k palabras Golay(24,12) entrelazadas (k ≥ 8)
 
-    reposo (mark) 20 ms · preámbulo 0x55 0x55 0x55 · sync 0x2D 0xD4 ·
-    cabecera (versión<<4 | tipo) · longitud · carga · CRC-16/CCITT-FALSE · reposo 2 bits
+Bloque de datos antes de codificar (12·k bits, relleno con ceros):
 
-Cada byte va en formato asíncrono: bit de inicio 0, 8 bits LSB primero, bit de parada 1.
-Mark (1) = 1200 Hz, space (0) = 2200 Hz, 1200 baudios, fase continua.
-Con un indicativo de 5 letras dura ~145 ms.
+    versión (3 bits) | tipo (3) | longitud (6) | carga (8·longitud) | CRC-16/CCITT-FALSE (16)
+
+El CRC cubre los 12 bits de cabecera (como 2 bytes, alineados a la derecha) y la carga.
+Cada palabra Golay corrige hasta 3 bits; el entrelazado (se transmiten las columnas: bit 0
+de todas las palabras, luego el bit 1...) reparte una pérdida de 20 ms (24 bits) en ≤3 bits
+por palabra cuando k ≥ 8. El receptor no necesita saber k: prueba de 8 a 24 y se queda con
+la que da CRC correcto. Mark (1) = 1200 Hz, space (0) = 2200 Hz, 1200 baudios, fase continua.
 """
 from __future__ import annotations
 
@@ -16,143 +20,270 @@ import math
 RATE = 8000
 BAUD = 1200
 MARK, SPACE = 1200.0, 2200.0
-SPB = RATE / BAUD  # 6.667 muestras por bit
-
-PREAMBLE = b"\x55\x55\x55"
-SYNC = b"\x2d\xd4"
-VERSION = 0
+SPB = RATE / BAUD
+VERSION = 1
 TYPE_CALLSIGN = 1
 TYPE_TEXT = 2
 MAX_LEN = 32
-LEAD_BITS = 24  # 20 ms de 1200 Hz puro: lo usan los detectores en flujo para saber cuándo mirar
+LEAD_BITS = 24
+PREAMBLE_BITS = [i & 1 for i in range(16)]            # 0101…
+SYNC_WORD = 0x1ACFFC1D
+SYNC_BITS = [(SYNC_WORD >> (31 - i)) & 1 for i in range(32)]
+MIN_WORDS = 8
+MAX_WORDS = 24
 ALLOWED = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/-")
 
+# --------------------------------------------------------------------------- Golay (24,12)
+
+_GOLAY_POLY = 0xC75      # g(x) = x^11 + x^10 + x^6 + x^5 + x^4 + x^2 + 1  (Golay 23,12)
+
+
+def golay_encode(data12: int) -> int:
+    """Golay (24,12) sistemático: 12 bits de datos arriba, 11 de paridad (23,12) y 1 de paridad global."""
+    r = data12 << 11
+    for i in range(22, 10, -1):
+        if r & (1 << i):
+            r ^= _GOLAY_POLY << (i - 11)
+    cw23 = (data12 << 11) | r
+    return (cw23 << 1) | (bin(cw23).count("1") & 1)
+
+
+def _syndrome(word24: int) -> int:
+    return (word24 & 0xFFF) ^ (golay_encode(word24 >> 12) & 0xFFF)
+
+
+def _build_table():
+    table = {0: 0}
+    for a in range(24):
+        table.setdefault(_syndrome(1 << a), 1 << a)
+    for a in range(24):
+        for b in range(a + 1, 24):
+            e = (1 << a) | (1 << b)
+            table.setdefault(_syndrome(e), e)
+    for a in range(24):
+        for b in range(a + 1, 24):
+            for c in range(b + 1, 24):
+                e = (1 << a) | (1 << b) | (1 << c)
+                table.setdefault(_syndrome(e), e)
+    return table
+
+
+_GOLAY_TABLE = _build_table()
+
+
+def golay_decode(word24: int):
+    """→ (datos de 12 bits, nº de bits corregidos) o None si no se puede corregir."""
+    e = _GOLAY_TABLE.get(_syndrome(word24))
+    if e is None:
+        return None
+    return (word24 ^ e) >> 12, bin(e).count("1")
+
+
+# --------------------------------------------------------------------------- trama
 
 def crc16(data: bytes) -> int:
     crc = 0xFFFF
     for b in data:
         crc ^= b << 8
         for _ in range(8):
-            crc = ((crc << 1) ^ 0x1021) if crc & 0x8000 else crc << 1
-            crc &= 0xFFFF
+            crc = ((crc << 1) ^ 0x1021) & 0xFFFF if crc & 0x8000 else (crc << 1) & 0xFFFF
     return crc
 
 
-def frame(payload: str, kind: int = TYPE_CALLSIGN) -> bytes:
-    p = payload.strip().upper().encode("ascii")
+def _payload_bits(text: str, kind: int) -> list[int]:
+    p = text.strip().upper().encode("ascii")
     if not 0 < len(p) <= MAX_LEN:
         raise ValueError("payload length")
     if kind == TYPE_CALLSIGN and not set(p.decode()) <= ALLOWED:
         raise ValueError("callsign characters")
-    body = bytes([(VERSION << 4) | kind, len(p)]) + p
-    c = crc16(body)
-    return PREAMBLE + SYNC + body + bytes([c >> 8, c & 0xFF])
+    hdr = (VERSION << 9) | (kind << 6) | len(p)
+    crc = crc16(hdr.to_bytes(2, "big") + p)
+    bits = [(hdr >> (11 - i)) & 1 for i in range(12)]
+    for b in p + crc.to_bytes(2, "big"):
+        bits += [(b >> (7 - i)) & 1 for i in range(8)]
+    return bits
 
 
-def _bits(data: bytes) -> list[int]:
-    out: list[int] = []
-    for b in data:
-        out.append(0)
-        out += [(b >> i) & 1 for i in range(8)]
-        out.append(1)
-    return out
+def words_for(n_bits: int) -> int:
+    return max(MIN_WORDS, -(-n_bits // 12))
 
 
-def modulate(callsign: str, kind: int = TYPE_CALLSIGN, amp: float = 0.5) -> list[float]:
-    bits = [1] * LEAD_BITS + _bits(frame(callsign, kind)) + [1, 1]
-    out, phase, t = [], 0.0, 0.0
-    total = len(bits) * SPB
-    n = 0
-    while n < total:
+def encode_block(text: str, kind: int = TYPE_CALLSIGN) -> list[int]:
+    """Bits del bloque codificado (Golay + entrelazado)."""
+    bits = _payload_bits(text, kind)
+    k = words_for(len(bits))
+    bits += [0] * (12 * k - len(bits))
+    words = []
+    for w in range(k):
+        v = 0
+        for b in bits[12 * w:12 * w + 12]:
+            v = (v << 1) | b
+        words.append(golay_encode(v))
+    return [(words[w] >> (23 - c)) & 1 for c in range(24) for w in range(k)]
+
+
+def frame_bits(text: str, kind: int = TYPE_CALLSIGN) -> list[int]:
+    return [1] * LEAD_BITS + PREAMBLE_BITS + SYNC_BITS + encode_block(text, kind) + [1, 1]
+
+
+def modulate(text: str, kind: int = TYPE_CALLSIGN, amp: float = 0.5) -> list[float]:
+    bits = frame_bits(text, kind)
+    out, phase = [], 0.0
+    total = int(math.ceil(len(bits) * SPB))
+    for n in range(total):
         b = bits[min(int(n / SPB), len(bits) - 1)]
         phase += 2 * math.pi * (MARK if b else SPACE) / RATE
         out.append(amp * math.sin(phase))
-        n += 1
     return out
 
 
-# ------------------------------------------------------------------ demodulación
+def duration_ms(text: str) -> float:
+    return len(frame_bits(text)) * 1000 / BAUD
 
-def _discriminator(x: list[float]) -> list[float]:
-    """>0 = mark, <0 = space. Correlación no coherente sobre una ventana de 1 bit."""
+
+# --------------------------------------------------------------------------- demodulación
+
+def _discriminator(x):
     n = len(x)
     w = int(round(SPB))
-    cm = [complex(math.cos(2 * math.pi * MARK * i / RATE), -math.sin(2 * math.pi * MARK * i / RATE)) for i in range(n)]
-    cs = [complex(math.cos(2 * math.pi * SPACE * i / RATE), -math.sin(2 * math.pi * SPACE * i / RATE)) for i in range(n)]
-    pm = [x[i] * cm[i] for i in range(n)]
-    ps = [x[i] * cs[i] for i in range(n)]
+    cm = [math.cos(2 * math.pi * MARK * i / RATE) for i in range(n)]
+    sm = [math.sin(2 * math.pi * MARK * i / RATE) for i in range(n)]
+    cs = [math.cos(2 * math.pi * SPACE * i / RATE) for i in range(n)]
+    ss = [math.sin(2 * math.pi * SPACE * i / RATE) for i in range(n)]
     d = [0.0] * n
-    am = as_ = 0j
-    for i in range(n):
-        am += pm[i]; as_ += ps[i]
-        if i >= w:
-            am -= pm[i - w]; as_ -= ps[i - w]
-        d[i] = abs(am) - abs(as_)
-    # el valor en i describe la ventana que termina en i: centrarlo
+    a = b = c = e = 0.0
     half = w // 2
-    return d[half:] + [0.0] * half
+    for i in range(n):
+        v = x[i]
+        a += v * cm[i]; b += v * sm[i]; c += v * cs[i]; e += v * ss[i]
+        if i >= w:
+            u = x[i - w]
+            a -= u * cm[i - w]; b -= u * sm[i - w]; c -= u * cs[i - w]; e -= u * ss[i - w]
+        j = i - half
+        if j >= 0:
+            d[j] = math.hypot(a, b) - math.hypot(c, e)
+    return d
 
 
-def _uart_bytes(d: list[float], start: float, nbytes: int) -> bytes | None:
-    """Lee nbytes asíncronos empezando en el bit de inicio que comienza en la muestra start."""
-    out = bytearray()
-    pos = start
-    for _ in range(nbytes):
-        def bit(k: int) -> int:
-            i = int(pos + (k + 0.5) * SPB)
-            return 1 if i < len(d) and d[i] > 0 else 0
-        if bit(0) != 0 or bit(9) != 1:
-            return None
-        out.append(sum(bit(1 + i) << i for i in range(8)))
-        pos += 10 * SPB
-        # resincroniza con el flanco del siguiente bit de inicio (tolerancia de reloj)
-        lo, hi = int(pos - SPB / 2), int(pos + SPB / 2)
-        for j in range(max(lo, 1), min(hi, len(d))):
-            if d[j - 1] > 0 >= d[j]:
-                pos = float(j)
-                break
-    return bytes(out)
+_REF = PREAMBLE_BITS[-8:] + SYNC_BITS          # lo que se busca: cola del preámbulo + sincronismo
 
 
-def demodulate(x: list[float]) -> list[tuple[int, str, int]]:
-    """Devuelve [(tipo, texto, muestra_inicio)] de las ráfagas válidas (CRC correcto)."""
-    if len(x) < 100:
-        return []
-    d = _discriminator(x)
-    found: list[tuple[int, str, int]] = []
-    i = 1
-    n = len(d)
-    while i < n:
-        # flanco mark -> space: posible bit de inicio
-        if not (d[i - 1] > 0 >= d[i]):
-            i += 1
+def _find_sync(d, start, end, max_err=3):
+    """Posiciones (muestra donde empieza el 1.er bit de _REF) con ≤max_err errores."""
+    found = []
+    nref = len(_REF)
+    span = int(nref * SPB) + 2
+    o = start
+    while o < end and o + span < len(d):
+        err = 0
+        for k in range(nref):
+            bit = 1 if d[int(o + (k + 0.5) * SPB)] > 0 else 0
+            if bit != _REF[k]:
+                err += 1
+                if err > max_err:
+                    break
+        if err <= max_err:
+            # afinar: la mejor fase dentro de ±3 muestras (menos errores, y si empata, más margen)
+            best = None
+            for f in range(o, o + 7):
+                if f + span >= len(d):
+                    break
+                e2 = 0; marg = 0.0
+                for k in range(nref):
+                    v = d[int(f + (k + 0.5) * SPB)]
+                    if (v > 0) != (_REF[k] == 1):
+                        e2 += 1
+                    marg += abs(v)
+                key = (e2, -marg)
+                if best is None or key < best[0]:
+                    best = (key, f)
+            found.append(best[1])
+            o = best[1] + span
             continue
-        hdr = _uart_bytes(d, float(i), 2)
-        if hdr is None or hdr != SYNC:
-            i += 1
-            continue
-        pos = i + 20 * SPB
-        lenb = _uart_bytes(d, pos, 2)
-        if lenb is None or (lenb[0] >> 4) != VERSION or not 0 < lenb[1] <= MAX_LEN:
-            i += 1
-            continue
-        rest = _uart_bytes(d, pos, 2 + lenb[1] + 2)
-        if rest is None:
-            i += 1
-            continue
-        body, c = rest[:-2], (rest[-2] << 8) | rest[-1]
-        if crc16(body) == c:
-            try:
-                found.append((body[0] & 0x0F, body[2:].decode("ascii"), i))
-            except UnicodeDecodeError:
-                pass
-            i = int(pos + len(rest) * 10 * SPB)
-            continue
-        i += 1
+        o += 1
     return found
 
 
-# ------------------------------------------------------------------ flujo (para nodos y puentes)
+def _read_bits(d, pos, n):
+    """Lee n bits desde pos siguiendo el reloj con los cruces por cero."""
+    bits = []
+    prev = None
+    for k in range(n):
+        c = pos + 0.5 * SPB
+        i = int(c)
+        if i >= len(d):
+            break
+        v = 1 if d[i] > 0 else 0
+        if prev is not None and v != prev:
+            # el cruce debería caer en «pos» (inicio del bit): corregir la fase un poco
+            lo, hi = int(pos - SPB / 2), int(pos + SPB / 2)
+            for j in range(max(lo, 1), min(hi, len(d))):
+                if (d[j - 1] > 0) != (d[j] > 0):
+                    pos += 0.25 * (j - pos)
+                    break
+        bits.append(v)
+        prev = v
+        pos += SPB
+    return bits
+
+
+def _decode_block(bits):
+    """Prueba k = 8..24 palabras; devuelve (tipo, texto, k, corregidos) o None."""
+    for k in range(MIN_WORDS, MAX_WORDS + 1):
+        if len(bits) < 24 * k:
+            break
+        words = [0] * k
+        for c in range(24):
+            for w in range(k):
+                words[w] = (words[w] << 1) | bits[c * k + w]
+        data = []
+        fixed = 0
+        ok = True
+        for w in words:
+            r = golay_decode(w)
+            if r is None:
+                ok = False
+                break
+            data.append(r[0]); fixed += r[1]
+        if not ok:
+            continue
+        hdr = data[0]
+        ver, kind, n = hdr >> 9, (hdr >> 6) & 7, hdr & 0x3F
+        if ver != VERSION or not 0 < n <= MAX_LEN or words_for(12 + 8 * n + 16) != k:
+            continue
+        flat = []
+        for v in data[1:]:
+            flat += [(v >> (11 - i)) & 1 for i in range(12)]
+        by = bytes(int("".join(map(str, flat[8 * i:8 * i + 8])), 2) for i in range(n + 2))
+        if crc16(hdr.to_bytes(2, "big") + by[:n]) != int.from_bytes(by[n:n + 2], "big"):
+            continue
+        try:
+            return kind, by[:n].decode("ascii"), k, fixed
+        except UnicodeDecodeError:
+            return None
+    return None
+
+
+def demodulate(x, stats=None):
+    """[(tipo, texto, muestra_inicio)] de las ráfagas válidas."""
+    if len(x) < 200:
+        return []
+    d = _discriminator(x)
+    out = []
+    for pos in _find_sync(d, 0, len(d)):
+        start = pos + len(_REF) * SPB
+        bits = _read_bits(d, start, 24 * MAX_WORDS)
+        r = _decode_block(bits)
+        if r:
+            kind, text, k, fixed = r
+            if stats is not None:
+                stats.append(fixed)
+            begin = int(pos - (LEAD_BITS + len(PREAMBLE_BITS) - 8) * SPB)
+            out.append((kind, text, max(0, begin)))
+    return out
+
+
+# --------------------------------------------------------------------------- flujo
 
 def _goertzel(x, f):
     c = 2 * math.cos(2 * math.pi * f / RATE)
@@ -164,7 +295,6 @@ def _goertzel(x, f):
 
 
 def mark_purity(x):
-    """Fracción de la energía de ``x`` que es un tono de 1200 Hz (≈1 en el reposo inicial)."""
     n = len(x)
     e = sum(v * v for v in x)
     if n == 0 or e < 1e-6 * n:
@@ -172,23 +302,24 @@ def mark_purity(x):
     return _goertzel(x, MARK) * 2 / (n * e)
 
 
-class StreamDecoder:
-    """Decodificador en flujo por tramas (normalmente 160 muestras = 20 ms).
+def frame_samples(text: str) -> int:
+    return int(math.ceil(len(frame_bits(text)) * SPB))
 
-    Busca el reposo inicial (20 ms de 1200 Hz puro) con ventanas de 80 muestras cada 40;
-    cuando lo ve, espera a tener la ráfaga entera y la demodula. ``feed`` devuelve
-    ``[(texto, primera_trama, última_trama)]`` para poder silenciar esas tramas.
-    """
+
+class StreamDecoder:
+    """Igual que en v0: busca el reposo de 1200 Hz y, al verlo, demodula cuando ha llegado la ráfaga."""
 
     WIN, HOP = 80, 40
+    FIRST_WAIT = 13      # tramas de 20 ms hasta tener una ráfaga corta entera (~240 ms)
+    LAST_WAIT = 30       # la más larga (32 caracteres, ~560 ms)
 
-    def __init__(self, purity=0.8, keep_frames=40):
+    def __init__(self, purity=0.8, keep_frames=50):
         self.purity = purity
         self.keep = keep_frames
-        self.frames = []          # [(n, muestras)]
+        self.frames = []
         self.n = 0
-        self.tail = []            # últimas muestras de la trama anterior (ventanas que cruzan tramas)
-        self.pending = []         # [(trama_inicio, tramas_a_esperar, intentos)]
+        self.tail = []
+        self.pending = []
         self.done_until = -1
 
     def feed(self, frame):
@@ -202,10 +333,9 @@ class StreamDecoder:
         if n > self.done_until and not self.pending:
             for i in range(0, len(x) - self.WIN + 1, self.HOP):
                 if mark_purity(x[i:i + self.WIN]) > self.purity:
-                    self.pending.append((n - 1, 9))  # 20 ms de reposo + ~145 ms de trama
+                    self.pending.append((n - 1, self.FIRST_WAIT))
                     break
-        out = []
-        keep = []
+        out, keep = [], []
         for start, wait in self.pending:
             if n - start < wait:
                 keep.append((start, wait))
@@ -214,8 +344,8 @@ class StreamDecoder:
             if hits:
                 out += hits
                 self.done_until = max(h[2] for h in hits)
-            elif wait < 22:
-                keep.append((start, wait + 1))   # aún no ha llegado entera: probar en la trama siguiente
+            elif wait < self.LAST_WAIT:
+                keep.append((start, wait + 1))
         self.pending = keep
         return out
 
@@ -236,9 +366,6 @@ class StreamDecoder:
         for kind, t, start in demodulate(x):
             if kind != TYPE_CALLSIGN:
                 continue
-            nbytes = len(PREAMBLE) + len(SYNC) + 2 + len(t) + 2
-            end = start + int((nbytes * 10 + 2) * SPB)
-            # desde la trama anterior al reposo hasta la trama del final
-            a = k0 + max(0, (start - int((LEAD_BITS + 30) * SPB)) // 160)
-            out.append((t, a, k0 + end // 160))
+            end = start + frame_samples(t)
+            out.append((t, k0 + start // 160, k0 + end // 160))
         return out

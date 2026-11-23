@@ -24,8 +24,9 @@ class StreamTest(unittest.TestCase):
         self.assertEqual([t for t, _, _ in r], ["C31AG"])
         _, a, b = r[0]
         self.assertLessEqual(a, 600 // 20)
-        self.assertGreaterEqual(b, (600 + 140) // 20 - 1)
-        self.assertLessEqual(b, (600 + 140) // 20 + 2)
+        end_ms = 600 + burst.frame_samples("C31AG") / 8
+        self.assertGreaterEqual(b, int(end_ms // 20) - 1)
+        self.assertLessEqual(b, int(end_ms // 20) + 2)
 
     def test_end_burst_then_nothing(self):
         r = self.run_all(fake_voice(500) + burst.modulate("EA3IGD"))

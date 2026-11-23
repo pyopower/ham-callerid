@@ -277,6 +277,7 @@ class Proxy:
         self.restore_at = 0.0
         self.up_call: str | None = None       # indicativo de la ráfaga de esta transmisión
         self.last_asl_audio = 0.0
+        self.last_seq = None
         self.last_asl_n = -1000
         self.hbp = HbpRelay(a.hbp_listen, a.hbp_master, self.ta_for_stream, a.dmra) if a.hbp_listen else None
         # AB → ASL
@@ -306,7 +307,15 @@ class Proxy:
         self.last_asl_audio = now
         x = pcm_to_floats(payload)
         if len(x) == FRAME:
-            hits = self.dec.feed(x)
+            # paquetes perdidos (salto en la secuencia USRP): el decodificador recibe silencio en
+            # su lugar para no perder el compás (la corrección de errores se ocupa del resto)
+            hits = []
+            gap = (seq - self.last_seq - 1) if self.last_seq is not None else 0
+            if 0 < gap <= 5:
+                for _ in range(gap):
+                    hits += self.dec.feed([0.0] * FRAME)
+            self.last_seq = seq
+            hits += self.dec.feed(x)
             if key == 0 and self.up_keyed:
                 hits += self.dec.flush()
             for call, first, last in hits:

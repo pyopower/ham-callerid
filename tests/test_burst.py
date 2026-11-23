@@ -37,7 +37,7 @@ def resample(x, ratio):
 class BurstTest(unittest.TestCase):
     def test_duration(self):
         ms = len(burst.modulate("C31AG")) * 1000 / R
-        self.assertLess(ms, 170)
+        self.assertLess(ms, 230)
 
     def test_clean(self):
         r = burst.demodulate(silence(50) + burst.modulate("C31AG") + silence(50))
@@ -75,8 +75,27 @@ class BurstTest(unittest.TestCase):
 
     def test_rejects_bad_callsign(self):
         with self.assertRaises(ValueError):
-            burst.frame("C31AG!")
+            burst.frame_bits("C31AG!")
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GolayTest(unittest.TestCase):
+    def test_corrects_three(self):
+        import random
+        r = random.Random(7)
+        for _ in range(500):
+            d = r.randrange(4096)
+            e = 0
+            for p in r.sample(range(24), 3):
+                e |= 1 << p
+            self.assertEqual(burst.golay_decode(burst.golay_encode(d) ^ e)[0], d)
+
+    def test_survives_20ms_gap_filled_with_silence(self):
+        x = burst.modulate("C31AG", amp=0.3)
+        for gap_at in (900, 1300, 1600):           # dentro del bloque codificado
+            y = x[:gap_at] + [0.0] * 160 + x[gap_at + 160:]
+            r = burst.demodulate([0.0] * 300 + y + [0.0] * 300)
+            self.assertEqual([t for _, t, _ in r], ["C31AG"], gap_at)
