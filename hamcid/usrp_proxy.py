@@ -227,6 +227,10 @@ class Proxy:
     def on_upstream_call(self, call: str):
         if self.id_set:
             return
+        base = call.upper().split("/")[0].split("-")[0]
+        if self.a.allow and base not in self.a.allow:
+            log.info("ASL→DMR: ráfaga %s (fuera de --allow: ID de pasarela)", call)
+            return
         dmrid = self.ids.id_for(call)
         log.info("ASL→DMR: ráfaga %s → ID %s (n=%d)", call, dmrid, self.frame_n)
         if dmrid:
@@ -352,8 +356,11 @@ def main(argv=None):
     p.add_argument("--ids", default="/var/lib/dvswitch/subscriber_ids.csv")
     p.add_argument("--delay", type=int, default=300, help="retardo ASL→DMR en ms (≥ 300)")
     p.add_argument("--level", type=float, default=0.25, help="amplitud de la ráfaga hacia ASL (0-1)")
+    p.add_argument("--allow", default="", help="indicativos (separados por comas) que pueden salir con su ID "
+                   "DMR real; vacío = todos. Los demás usan el ID de la pasarela")
     p.add_argument("-v", "--verbose", action="store_true")
     a = p.parse_args(argv)
+    a.allow = {c.strip().upper() for c in a.allow.split(",") if c.strip()}
     logging.basicConfig(level=logging.DEBUG if a.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
     Proxy(a).run()
