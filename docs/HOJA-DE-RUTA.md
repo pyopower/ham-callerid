@@ -14,7 +14,10 @@
 - [x] Trama v0 propia (sin FEC; CRC-16) — revisar FEC y AX.25 UI más adelante
 - [x] Generador/decodificador de referencia (`hamcid/burst.py`) + pruebas
 - [x] Mobile ASL Client: emite al pulsar/soltar y descodifica lo recibido (probado OP8T ↔ ZUK por el nodo 1922)
-- [ ] Silenciar la ráfaga en recepción (retardo + mute)
+- [x] Voz retrasada tras la ráfaga de inicio (no se pierde voz si hablas al pulsar); fin = voz pendiente → ráfaga → unkey
+- [x] Medido OP8T ← ZUK por 1922: 22/24 ráfagas, 12/12 transmisiones identificadas
+- [ ] Robustez ante pérdida de un paquete de 20 ms: FEC + entrelazado o repetir la carga 🔶
+- [~] Silenciar la ráfaga en recepción: descartado de momento en la app (el usuario prefiere oírla a añadir retardo); sí en nodos/puentes
 - [ ] Probar a través de EchoLink (GSM) y de radio FM real
 - [ ] ADN PoC
 - [ ] Firmware libre (Quansheng, OpenGD77 analógico)
