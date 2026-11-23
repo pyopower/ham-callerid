@@ -313,7 +313,7 @@ class StreamDecoder:
     FIRST_WAIT = 13      # tramas de 20 ms hasta tener una ráfaga corta entera (~240 ms)
     LAST_WAIT = 30       # la más larga (32 caracteres, ~560 ms)
 
-    def __init__(self, purity=0.8, keep_frames=50):
+    def __init__(self, purity=0.5, keep_frames=50):
         self.purity = purity
         self.keep = keep_frames
         self.frames = []
