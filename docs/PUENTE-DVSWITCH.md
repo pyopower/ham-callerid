@@ -52,3 +52,28 @@ ASL (chan_usrp) ⇄ [hcid-usrp-proxy] ⇄ Analog_Bridge ⇄ MMDVM_Bridge ⇄ ADN
   al principio y al final del audio hacia ASL.
 - Solo cambia puertos (ASL apunta al proxy y el proxy a AB); se quita volviendo a los puertos
   originales.
+
+## Intermediario implementado: `hamcid/usrp_proxy.py` (23-nov-2026)
+
+```
+python3 -m hamcid.usrp_proxy --listen-asl IP:P --asl IP:P --listen-ab IP:P --ab IP:P \
+        --ab-tlv IP:P --gateway-id N --tg N [--ts 2] [--delay 300] [--level 0.25]
+```
+
+Solo biblioteca estándar (micro2 no tiene numpy). ~25 MB de RAM, CPU despreciable.
+
+- Detector en flujo: busca los **20 ms de 1200 Hz** del reposo inicial (ventanas de 80 muestras
+  cada 40; 0 falsos disparos en 20 s de voz simulada) y solo entonces demodula (≈3 ms).
+- Índice de IDs compacto en memoria (4,4 MB para 310 524 indicativos, búsqueda binaria). Leer
+  el CSV en cada llamada costaba ~350 ms y hacía que la llamada saliera con el ID de la pasarela.
+
+Laboratorio (lab1 ⇄ proxy, lab2 al otro lado, TG 5020):
+
+| Prueba | Resultado |
+|---|---|
+| ASL→DMR con ráfaga C31AG | master: `src=2130035` ✅; ráfaga silenciada en el otro extremo ✅ |
+| ASL→DMR siguiente sin ráfaga | `src=50002` (pasarela restaurada) ✅ |
+| DMR→ASL llamada de VA3BOC (1023007) | «ASL» descodifica `VA3BOC` al principio y al final ✅ |
+
+Pendiente para producción (60596 ⇄ TG 213): servicio systemd, cambio de puertos
+(AB `[USRP] address=127.0.0.1 txPort/rxPort` → proxy; ASL sigue igual), prueba con la app.

@@ -2,7 +2,7 @@
 
 Trama (ver docs/SPEC.md §5):
 
-    reposo (mark) 10 ms · preámbulo 0x55 0x55 0x55 · sync 0x2D 0xD4 ·
+    reposo (mark) 20 ms · preámbulo 0x55 0x55 0x55 · sync 0x2D 0xD4 ·
     cabecera (versión<<4 | tipo) · longitud · carga · CRC-16/CCITT-FALSE · reposo 2 bits
 
 Cada byte va en formato asíncrono: bit de inicio 0, 8 bits LSB primero, bit de parada 1.
@@ -24,6 +24,7 @@ VERSION = 0
 TYPE_CALLSIGN = 1
 TYPE_TEXT = 2
 MAX_LEN = 32
+LEAD_BITS = 24  # 20 ms de 1200 Hz puro: lo usan los detectores en flujo para saber cuándo mirar
 ALLOWED = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/-")
 
 
@@ -58,7 +59,7 @@ def _bits(data: bytes) -> list[int]:
 
 
 def modulate(callsign: str, kind: int = TYPE_CALLSIGN, amp: float = 0.5) -> list[float]:
-    bits = [1] * 12 + _bits(frame(callsign, kind)) + [1, 1]
+    bits = [1] * LEAD_BITS + _bits(frame(callsign, kind)) + [1, 1]
     out, phase, t = [], 0.0, 0.0
     total = len(bits) * SPB
     n = 0
@@ -149,3 +150,95 @@ def demodulate(x: list[float]) -> list[tuple[int, str, int]]:
             continue
         i += 1
     return found
+
+
+# ------------------------------------------------------------------ flujo (para nodos y puentes)
+
+def _goertzel(x, f):
+    c = 2 * math.cos(2 * math.pi * f / RATE)
+    s1 = s2 = 0.0
+    for v in x:
+        s0 = v + c * s1 - s2
+        s2, s1 = s1, s0
+    return s1 * s1 + s2 * s2 - c * s1 * s2
+
+
+def mark_purity(x):
+    """Fracción de la energía de ``x`` que es un tono de 1200 Hz (≈1 en el reposo inicial)."""
+    n = len(x)
+    e = sum(v * v for v in x)
+    if e < 1e-6 * n:
+        return 0.0
+    return _goertzel(x, MARK) * 2 / (n * e)
+
+
+class StreamDecoder:
+    """Decodificador en flujo por tramas (normalmente 160 muestras = 20 ms).
+
+    Busca el reposo inicial (20 ms de 1200 Hz puro) con ventanas de 80 muestras cada 40;
+    cuando lo ve, espera a tener la ráfaga entera y la demodula. ``feed`` devuelve
+    ``[(texto, primera_trama, última_trama)]`` para poder silenciar esas tramas.
+    """
+
+    WIN, HOP = 80, 40
+
+    def __init__(self, purity=0.8, keep_frames=40):
+        self.purity = purity
+        self.keep = keep_frames
+        self.frames = []          # [(n, muestras)]
+        self.n = 0
+        self.tail = []            # últimas muestras de la trama anterior (ventanas que cruzan tramas)
+        self.pending = []         # [(trama_inicio, tramas_a_esperar, intentos)]
+        self.done_until = -1
+
+    def feed(self, frame):
+        n = self.n
+        self.n += 1
+        self.frames.append((n, frame))
+        if len(self.frames) > self.keep:
+            self.frames.pop(0)
+        x = self.tail + list(frame)
+        self.tail = list(frame[-self.WIN:])
+        if n > self.done_until and not self.pending:
+            for i in range(0, len(x) - self.WIN + 1, self.HOP):
+                if mark_purity(x[i:i + self.WIN]) > self.purity:
+                    self.pending.append((n - 1, 9))  # 20 ms de reposo + ~145 ms de trama
+                    break
+        out = []
+        keep = []
+        for start, wait in self.pending:
+            if n - start < wait:
+                keep.append((start, wait))
+                continue
+            hits = self._scan(start, n)
+            if hits:
+                out += hits
+                self.done_until = max(h[2] for h in hits)
+            elif wait < 22:
+                keep.append((start, wait + 1))   # aún no ha llegado entera: probar en la trama siguiente
+        self.pending = keep
+        return out
+
+    def flush(self):
+        out = []
+        for start, _ in self.pending:
+            out += self._scan(start, self.n - 1)
+        self.pending = []
+        return out
+
+    def _scan(self, first, last):
+        sel = [(k, f) for k, f in self.frames if first <= k <= last]
+        if not sel:
+            return []
+        k0 = sel[0][0]
+        x = [v for _, f in sel for v in f]
+        out = []
+        for kind, t, start in demodulate(x):
+            if kind != TYPE_CALLSIGN:
+                continue
+            nbytes = len(PREAMBLE) + len(SYNC) + 2 + len(t) + 2
+            end = start + int((nbytes * 10 + 2) * SPB)
+            # desde la trama anterior al reposo hasta la trama del final
+            a = k0 + max(0, (start - int((LEAD_BITS + 30) * SPB)) // 160)
+            out.append((t, a, k0 + end // 160))
+        return out

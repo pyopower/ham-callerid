@@ -110,7 +110,7 @@ Implementada en `hamcid/burst.py` (referencia) y en Mobile ASL Client (Kotlin), 
 entre sí bit a bit:
 
 ```
-reposo mark 12 bits · 55 55 55 · 2D D4 · (versión<<4 | tipo) · longitud · carga · CRC-16 (BE) · 2 bits mark
+reposo mark 24 bits (20 ms) · 55 55 55 · 2D D4 · (versión<<4 | tipo) · longitud · carga · CRC-16 (BE) · 2 bits mark
 ```
 
 - Bytes asíncronos: inicio 0, 8 bits LSB primero, parada 1. Mark 1200 Hz = 1, space 2200 Hz = 0.
