@@ -152,9 +152,10 @@ class HbpRelay:
         if self.injector.set_text(sid, text):
             self._announce(sid, rf, text, why)
 
-    def tick(self, unknown: str):
+    def tick(self, fallback):
         if self.pending and time.monotonic() - self.pending[2] > 1.5:
-            self.set_alias(unknown, "sin ráfaga") if unknown else setattr(self, "pending", None)
+            text = fallback()
+            self.set_alias(text, "sin ráfaga") if text else setattr(self, "pending", None)
 
     def _announce(self, sid: bytes, rf: bytes, text: str, why: str = ""):
         if self.dmra:
@@ -167,6 +168,102 @@ class HbpRelay:
     def from_master(self, d: bytes, addr=None):
         if self.bridge:
             self.local.sendto(d, self.bridge)
+
+
+class AmiWatcher:
+    """Pregunta a app_rpt (AMI) qué enlace del nodo está transmitiendo y quién es.
+
+    ``RPT_ALINKS`` marca con ``K`` los enlaces que transmiten. Un nodo EchoLink (3 + 6 dígitos)
+    se traduce a su indicativo (validado por EchoLink) con ``echolink dbget nodename``.
+    ``source()`` devuelve ("el", "EA3XXX"), ("iax", "C31AG"), ("node", "49352") o None.
+    """
+
+    def __init__(self, addr: str, user: str, secret: str, node: str, skip: set[str]):
+        self.addr = _addr(addr)
+        self.user, self.secret, self.node, self.skip = user, secret, node, skip
+        self.sock = None
+        self.buf = b""
+        self.lock = threading.Lock()
+        self.el_cache: dict[str, str | None] = {}
+
+    def _connect(self):
+        s = socket.create_connection(self.addr, timeout=3)
+        s.settimeout(3)
+        self.sock, self.buf = s, b""
+        self._read_until(b"\r\n")                    # saludo
+        r = self._action(f"Action: Login\r\nUsername: {self.user}\r\nSecret: {self.secret}\r\nEvents: off\r\n")
+        if "Success" not in r:
+            raise OSError("AMI: login rechazado")
+
+    def _read_until(self, sep: bytes) -> bytes:
+        while sep not in self.buf:
+            d = self.sock.recv(4096)
+            if not d:
+                raise OSError("AMI cerrado")
+            self.buf += d
+        out, self.buf = self.buf.split(sep, 1)
+        return out
+
+    def _action(self, text: str) -> str:
+        aid = "hcid%d" % int(time.monotonic() * 1000)
+        self.sock.sendall((text + f"ActionID: {aid}\r\n\r\n").encode())
+        while True:
+            block = self._read_until(b"\r\n\r\n").decode("utf-8", "ignore")
+            if aid in block or block.startswith("Response: Error"):
+                # algunas respuestas (Command) traen el texto en un bloque «Follows» que acaba en --END COMMAND--
+                if "Follows" in block and "--END COMMAND--" not in block:
+                    block += self._read_until(b"--END COMMAND--").decode("utf-8", "ignore")
+                return block
+
+    def _query(self, text: str) -> str:
+        with self.lock:
+            for _ in range(2):
+                try:
+                    if self.sock is None:
+                        self._connect()
+                    return self._action(text)
+                except OSError:
+                    try:
+                        self.sock and self.sock.close()
+                    except OSError:
+                        pass
+                    self.sock = None
+            return ""
+
+    def keyed_links(self) -> list[str]:
+        r = self._query(f"Action: RptStatus\r\nCOMMAND: XStat\r\nNODE: {self.node}\r\n")
+        for line in r.splitlines():
+            if "RPT_ALINKS=" in line:
+                items = line.split("RPT_ALINKS=", 1)[1].split(",")[1:]
+                return [i[:-2] for i in items if len(i) > 2 and i.endswith("K")]
+        return []
+
+    def echolink_call(self, num: str) -> str | None:
+        if num not in self.el_cache:
+            r = self._query(f"Action: Command\r\nCommand: echolink dbget nodename {num}\r\n")
+            call = None
+            for line in r.splitlines():
+                parts = line.replace("Output:", "").strip().split("|")
+                if len(parts) >= 2 and parts[0].strip() == num:
+                    call = parts[1].strip().upper()
+            self.el_cache[num] = call
+        return self.el_cache[num]
+
+    def source(self):
+        for link in self.keyed_links():
+            if link in self.skip:
+                continue
+            if link.isdigit() and len(link) == 7 and link.startswith("3"):
+                call = self.echolink_call(link[1:])
+                return ("el", call.split("-")[0] if call else "EL " + link[1:])
+            if link.isdigit():
+                return ("node", link)
+            name = "".join(c for c in link.upper() if c.isalnum() or c in "/-")
+            if name.startswith("0") and len(name) > 1:
+                name = name[1:]                       # clientes iaxRpt: «0» + indicativo
+            if name:
+                return ("iax", name)
+        return None
 
 
 # --------------------------------------------------------------------------- base de IDs
@@ -280,6 +377,13 @@ class Proxy:
         self.last_seq = None
         self.last_asl_n = -1000
         self.hbp = HbpRelay(a.hbp_listen, a.hbp_master, self.ta_for_stream, a.dmra) if a.hbp_listen else None
+        self.ami = None
+        if a.ami:
+            host, user, secret_file = a.ami.split(",")
+            secret = open(secret_file).read().strip()
+            self.ami = AmiWatcher(host, user, secret, a.node, {a.bridge_node} if a.bridge_node else set())
+        self.ami_src = None              # último origen visto por AMI durante la transmisión
+        self.ami_next = 0.0
         # AB → ASL
         self.down_q: collections.deque = collections.deque()  # (seq, key, typ, payload)
         self.down_keyed = False
@@ -302,6 +406,7 @@ class Proxy:
         self.frame_n += 1
         if n - self.last_asl_n > 25 or now - self.last_asl_audio > 1.0:   # hueco: transmisión nueva
             self.up_call = None
+            self.ami_src = None
             self.key_frame = n
         self.last_asl_n = n
         self.last_asl_audio = now
@@ -353,8 +458,9 @@ class Proxy:
 
     def pump_up(self):
         now = time.monotonic()
+        self.poll_ami()
         if self.hbp:
-            self.hbp.tick(self.a.unknown_ta)
+            self.hbp.tick(self.fallback_ta)
         with self.lock:
             while self.up_q and self.up_q[0][0] <= now:
                 _, seq, key, typ, payload, n = self.up_q.popleft()
@@ -370,6 +476,38 @@ class Proxy:
             self.id_set = False
             self.s_tlv.sendto(set_info(self.a.gateway_id, "", self.a.tg, self.a.ts), self.ab_tlv)
             log.info("ASL→DMR: ID de pasarela %d restaurado", self.a.gateway_id)
+
+    def poll_ami(self):
+        """Mientras entra audio de ASL, mira quién transmite (en un hilo, para no frenar el audio)."""
+        now = time.monotonic()
+        if not self.ami or now < self.ami_next or now - self.last_asl_audio > 1.0:
+            return
+        self.ami_next = now + 0.5
+
+        def run():
+            try:
+                src = self.ami.source()
+            except Exception:
+                log.exception("AMI")
+                return
+            if src and src != self.ami_src:
+                log.info("ASL: transmite %s %s", *src)
+            if src:
+                self.ami_src = src
+        threading.Thread(target=run, daemon=True).start()
+
+    def fallback_ta(self) -> str:
+        """Alias cuando no hubo ráfaga: lo que diga AMI, o el texto fijo."""
+        src = self.ami_src
+        if src:
+            kind, who = src
+            if kind == "el":
+                return f"{who}/EL" if not who.startswith("EL ") else who
+            if kind == "iax":
+                return f"{who}/{self.a.origin}"
+            if kind == "node":
+                return f"{self.a.origin} {who}"
+        return self.a.unknown_ta
 
     def ta_for_stream(self) -> str | None:
         """Alias de una llamada que empieza hacia DMR: texto, "" (de ASL, indicativo aún
@@ -489,6 +627,10 @@ def main(argv=None):
                    "(ADN/BM sí; HBlink3/4 NO: contestan NAK y cortan la llamada)")
     p.add_argument("--origin", default="ASL", help="sufijo de origen en el Talker Alias (C31AG/ASL)")
     p.add_argument("--unknown-ta", default="", help="Talker Alias si no hubo ráfaga (p. ej. 'ASL 60596')")
+    p.add_argument("--ami", default="", help="AMI de Asterisk para saber quién transmite: "
+                   "'host:puerto,usuario,fichero_con_la_clave'")
+    p.add_argument("--node", default="", help="nodo ASL donde mirar los enlaces (p. ej. 60596)")
+    p.add_argument("--bridge-node", default="", help="nodo USRP del propio puente, a ignorar (p. ej. 1932)")
     p.add_argument("--real-id", action="store_true", help="poner el ID DMR real del indicativo (solo "
                    "para ráfagas verificadas; hoy sin firma: desaconsejado)")
     p.add_argument("--allow", default="", help="con --real-id: indicativos que pueden salir con su ID real")

@@ -90,3 +90,37 @@ class PendingAliasTest(unittest.TestCase):
         out = [dmr_ta._get_emb(r.injector.process(pkt(v))[20:53]) for v in range(1, 5)]
         ta = dmr_ta.encode_emblc(dmr_ta.build_ta_lcs("C31AG/ASL")[0])
         self.assertEqual(out, [ta[v] for v in range(1, 5)])  # la supertrama siguiente ya lleva el alias
+
+
+class AmiTest(unittest.TestCase):
+    def test_source_parsing(self):
+        import socket
+        import threading
+        from hamcid.usrp_proxy import AmiWatcher
+        srv = socket.socket(); srv.bind(("127.0.0.1", 0)); srv.listen(1)
+        replies = {
+            "Login": "Response: Success\r\nMessage: Authentication accepted\r\n",
+            "RptStatus": "Response: Success\r\nVar: RPT_ALINKS=3,1932TK,3542499TK,49352TU\r\n",
+            "Command": "Response: Follows\r\nPrivilege: Command\r\n542499|C31AG-R|1.2.3.4\r\n--END COMMAND--",
+        }
+
+        def serve():
+            c, _ = srv.accept()
+            c.sendall(b"Asterisk Call Manager/7.0\r\n")
+            buf = b""
+            while True:
+                d = c.recv(4096)
+                if not d:
+                    return
+                buf += d
+                while b"\r\n\r\n" in buf:
+                    blk, buf = buf.split(b"\r\n\r\n", 1)
+                    t = blk.decode()
+                    act = t.split("Action: ", 1)[1].split("\r\n", 1)[0]
+                    aid = t.split("ActionID: ", 1)[1].split("\r\n", 1)[0]
+                    c.sendall((replies[act].replace("\r\n--END", "\r\nActionID: %s\r\n--END" % aid)
+                               if act == "Command" else replies[act] + "ActionID: %s\r\n" % aid).encode() + b"\r\n\r\n")
+        threading.Thread(target=serve, daemon=True).start()
+        w = AmiWatcher("127.0.0.1:%d" % srv.getsockname()[1], "admin", "x", "60596", {"1932"})
+        self.assertEqual(w.keyed_links(), ["1932", "3542499"])
+        self.assertEqual(w.source(), ("el", "C31AG"))
