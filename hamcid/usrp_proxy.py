@@ -384,6 +384,12 @@ class Proxy:
             self.ami = AmiWatcher(host, user, secret, a.node, {a.bridge_node} if a.bridge_node else set())
         self.ami_src = None              # último origen visto por AMI durante la transmisión
         self.ami_next = 0.0
+        # pistas locales «nodo alias» (p. ej. una pasarela que sabe quién habla por su nodo)
+        self.hints: dict[str, tuple[str, float]] = {}
+        self.s_hint = None
+        if a.hint_listen:
+            self.s_hint = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.s_hint.bind(_addr(a.hint_listen))
         # AB → ASL
         self.down_q: collections.deque = collections.deque()  # (seq, key, typ, payload)
         self.down_keyed = False
@@ -496,6 +502,29 @@ class Proxy:
                 self.ami_src = src
         threading.Thread(target=run, daemon=True).start()
 
+    def from_hint(self, d: bytes, addr=None):
+        """Pista «<nodo> <alias>» (o «<nodo> -» para borrarla), en texto, por UDP local.
+        El alias solo es texto para el Talker Alias: nunca cambia el DMR ID de la pasarela."""
+        parts = d.decode("utf-8", "replace").strip().split(None, 1)
+        if len(parts) != 2 or not parts[0].isdigit():
+            return
+        node, alias = parts
+        alias = "".join(c for c in alias if 32 <= ord(c) < 127)[:dmr_ta.MAX_LEN].strip()
+        with self.lock:
+            if alias in ("", "-"):
+                self.hints.pop(node, None)
+            else:
+                if self.hints.get(node, ("",))[0] != alias:
+                    log.info("Pista: nodo %s = «%s»", node, alias)
+                self.hints[node] = (alias, time.monotonic())
+
+    def hint_for(self, node: str) -> str | None:
+        with self.lock:
+            h = self.hints.get(node)
+        if h and time.monotonic() - h[1] < self.a.hint_ttl:
+            return h[0]
+        return None
+
     def fallback_ta(self) -> str:
         """Alias cuando no hubo ráfaga: lo que diga AMI, o el texto fijo."""
         src = self.ami_src
@@ -506,6 +535,9 @@ class Proxy:
             if kind == "iax":
                 return f"{who}/{self.a.origin}"
             if kind == "node":
+                hint = self.hint_for(who)
+                if hint:
+                    return hint
                 return f"{self.a.origin} {who}"
         return self.a.unknown_ta
 
@@ -573,7 +605,10 @@ class Proxy:
     def run(self):
         if self.hbp:
             self.hbp.run()
-        for s, fn in ((self.s_asl, self.from_asl), (self.s_ab, self.from_ab)):
+        socks = [(self.s_asl, self.from_asl), (self.s_ab, self.from_ab)]
+        if self.s_hint:
+            socks.append((self.s_hint, self.from_hint))
+        for s, fn in socks:
             threading.Thread(target=_rx_loop, args=(s, fn), daemon=True).start()
         log.info("ASL %s ⇄ proxy (%s | %s) ⇄ AB %s, TLV %s, pasarela %d, retardo %d ms",
                  self.a.asl, self.a.listen_asl, self.a.listen_ab, self.a.ab, self.a.ab_tlv,
@@ -626,6 +661,9 @@ def main(argv=None):
     p.add_argument("--dmra", action="store_true", help="mandar también el alias en paquetes HBP DMRA "
                    "(ADN/BM sí; HBlink3/4 NO: contestan NAK y cortan la llamada)")
     p.add_argument("--origin", default="ASL", help="sufijo de origen en el Talker Alias (C31AG/ASL)")
+    p.add_argument("--hint-listen", default="", help="UDP local para pistas «<nodo> <alias>» de otras "
+                   "pasarelas (p. ej. 127.0.0.1:31200); solo cambian el Talker Alias, nunca el DMR ID")
+    p.add_argument("--hint-ttl", type=float, default=75.0, help="segundos que vale una pista sin renovarse")
     p.add_argument("--unknown-ta", default="", help="Talker Alias si no hubo ráfaga (p. ej. 'ASL 60596')")
     p.add_argument("--ami", default="", help="AMI de Asterisk para saber quién transmite: "
                    "'host:puerto,usuario,fichero_con_la_clave'")

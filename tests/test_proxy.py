@@ -124,3 +124,36 @@ class AmiTest(unittest.TestCase):
         w = AmiWatcher("127.0.0.1:%d" % srv.getsockname()[1], "admin", "x", "60596", {"1932"})
         self.assertEqual(w.keyed_links(), ["1932", "3542499"])
         self.assertEqual(w.source(), ("el", "C31AG"))
+
+
+class HintTest(unittest.TestCase):
+    def _proxy(self):
+        import threading
+        import types
+        from hamcid.usrp_proxy import Proxy
+        p = object.__new__(Proxy)          # sin sockets: solo la lógica de pistas y alias
+        p.a = types.SimpleNamespace(hint_ttl=75.0, origin="ASL", unknown_ta="ASL 60596")
+        p.lock = threading.Lock()
+        p.hints = {}
+        p.ami_src = None
+        return p
+
+    def test_hint_gives_alias_for_that_node(self):
+        p = self._proxy()
+        p.from_hint(b"1934 EB1FPK/LoRa\n")
+        p.ami_src = ("node", "1934")
+        self.assertEqual(p.fallback_ta(), "EB1FPK/LoRa")
+        p.ami_src = ("node", "49352")                      # otro nodo: sin pista
+        self.assertEqual(p.fallback_ta(), "ASL 49352")
+
+    def test_hint_cleared_expired_and_sanitized(self):
+        p = self._proxy()
+        p.ami_src = ("node", "1934")
+        p.from_hint(b"1934 -")
+        self.assertEqual(p.fallback_ta(), "ASL 1934")
+        p.from_hint("1934 EB1FPK/LoRa\x07ñ".encode())          # control y no ASCII fuera
+        self.assertEqual(p.fallback_ta(), "EB1FPK/LoRa")
+        p.hints["1934"] = ("EB1FPK/LoRa", p.hints["1934"][1] - 100)   # caducada
+        self.assertEqual(p.fallback_ta(), "ASL 1934")
+        p.from_hint(b"no-es-nodo EB1FPK")                   # mal formada: se ignora
+        self.assertNotIn("no-es-nodo", p.hints)
