@@ -157,3 +157,15 @@ class HintTest(unittest.TestCase):
         self.assertEqual(p.fallback_ta(), "ASL 1934")
         p.from_hint(b"no-es-nodo EB1FPK")                   # mal formada: se ignora
         self.assertNotIn("no-es-nodo", p.hints)
+
+    def test_hint_used_from_first_frame(self):
+        import time
+        p = self._proxy()
+        p.up_call = None
+        p.last_asl_audio = time.monotonic()
+        self.assertEqual(p.ta_for_stream(), "")             # aún no se sabe quién: se decide en marcha
+        p.from_hint(b"1934 C31AG/LoRa")
+        p.ami_src = ("node", "1934")
+        self.assertEqual(p.ta_for_stream(), "C31AG/LoRa")   # nodo con pista: alias desde el principio
+        p.up_call = "EA3XYZ"                                # una ráfaga manda sobre la pista
+        self.assertEqual(p.ta_for_stream(), "EA3XYZ/ASL")

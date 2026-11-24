@@ -546,7 +546,12 @@ class Proxy:
         desconocido) o None (no viene de ASL)."""
         if time.monotonic() - self.last_asl_audio > 2.0:
             return None
-        return f"{self.up_call}/{self.a.origin}" if self.up_call else ""
+        if self.up_call:
+            return f"{self.up_call}/{self.a.origin}"
+        src = self.ami_src                    # un nodo con pista ya conocido: alias desde la 1ª trama
+        if src and src[0] == "node":
+            return self.hint_for(src[1]) or ""
+        return ""
 
     # ---- AB → ASL -----------------------------------------------------------
     def from_ab(self, d: bytes):
