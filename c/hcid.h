@@ -128,10 +128,11 @@ static int hcid__valid(const char *t, int type) {
 
 static int hcid__words_for(int nbits) { int k = (nbits + 11) / 12; return k < HCID__MINW ? HCID__MINW : k; }
 
-/* frame bits into bits[] (one per byte); returns count or 0 */
-static int hcid__frame_bits(const char *t, int type, uint8_t *bits) {
+/* frame bits into bits[] (one per byte, at most cap); returns count or 0 */
+static int hcid__frame_bits(const char *t, int type, uint8_t *bits, int cap) {
     int n = hcid__valid(t, type);
     if (!n) return 0;
+    if (24 + 16 + 32 + 24 * hcid__words_for(12 + 8 * (n + 2)) + 2 > cap) return 0;
     uint8_t data[24 * 12];
     int nb = 0;
     uint16_t hdr = (uint16_t)((1 << 9) | ((type & 7) << 6) | n);
@@ -162,23 +163,19 @@ static int hcid__frame_bits(const char *t, int type, uint8_t *bits) {
 }
 
 int hcid_frame_bits(const char *text, int type, uint8_t *bits, int cap) {
-    uint8_t tmp[HCID_MAX_BITS];
-    int m = hcid__frame_bits(text, type, tmp);
-    if (!m || m > cap) return 0;
-    memcpy(bits, tmp, (size_t)m);
-    return m;
+    return hcid__frame_bits(text, type, bits, cap);
 }
 
 #ifndef HCID_ENCODER_ONLY
 int hcid_frame_samples(const char *text) {
     uint8_t bits[24 + 16 + 32 + 24 * HCID__MAXW + 2];
-    int m = hcid__frame_bits(text, HCID_TYPE_CALLSIGN, bits);
+    int m = hcid__frame_bits(text, HCID_TYPE_CALLSIGN, bits, (int)sizeof bits);
     return m ? (int)ceil(m * HCID__SPB) : 0;
 }
 
 int hcid_modulate(const char *text, int type, float amp, int16_t *out, int cap) {
     uint8_t bits[24 + 16 + 32 + 24 * HCID__MAXW + 2];
-    int m = hcid__frame_bits(text, type, bits);
+    int m = hcid__frame_bits(text, type, bits, (int)sizeof bits);
     if (!m) return 0;
     int total = (int)ceil(m * HCID__SPB);
     if (total > cap) return 0;
