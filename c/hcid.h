@@ -13,6 +13,11 @@
  *     #include "hcid.h"
  *
  * Encoder:  int n = hcid_modulate("C31AG", HCID_TYPE_CALLSIGN, 0.3f, pcm, cap);   // int16 samples
+ *    or:   int m = hcid_frame_bits("C31AG", HCID_TYPE_CALLSIGN, bits, HCID_MAX_BITS); // line bits, for
+ *          radios that key their own AFSK tone generator at 1200 baud (1 = 1200 Hz, 0 = 2200 Hz)
+ *
+ * Firmware that only transmits can #define HCID_ENCODER_ONLY before the include: no <math.h>,
+ * no decoder and no 16 KB Golay table, only hcid_frame_bits() + CRC/Golay encoder.
  * Decoder:  hcid_demodulate(pcm, n, scratch, on_hit, user);  // scratch: n floats
  *           (feed it a window that holds a whole burst, e.g. the last 700 ms of audio)
  */
@@ -28,28 +33,36 @@
 #define HCID_MAX_LEN 32
 /* longest frame: 24+16+32 + 24*24 + 2 bits at 6.667 samples/bit */
 #define HCID_MAX_SAMPLES 4334
+#define HCID_MAX_BITS 650
 
 typedef void (*hcid_hit_fn)(int type, const char *text, int start_sample, void *user);
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+/* Line bits of the frame, one per byte (0/1), sent first to last at 1200 baud, mark (1) = 1200 Hz,
+ * space (0) = 2200 Hz, phase-continuous. Returns the count, 0 if the text is invalid or cap small. */
+int hcid_frame_bits(const char *text, int type, uint8_t *bits, int cap);
+uint32_t hcid_golay_encode(uint32_t data12);
+uint16_t hcid_crc16(const uint8_t *d, int n);
+#ifndef HCID_ENCODER_ONLY
 /* Returns the number of samples written, 0 if the text is invalid or cap too small. */
 int hcid_modulate(const char *text, int type, float amp, int16_t *out, int cap);
 /* Number of samples hcid_modulate() would write for this text (0 if invalid). */
 int hcid_frame_samples(const char *text);
 /* Finds every valid burst in pcm[0..n); scratch must hold n floats. Returns the number found. */
 int hcid_demodulate(const int16_t *pcm, int n, float *scratch, hcid_hit_fn cb, void *user);
-uint32_t hcid_golay_encode(uint32_t data12);
 int hcid_golay_decode(uint32_t word24);          /* 12 data bits or -1 */
-uint16_t hcid_crc16(const uint8_t *d, int n);
+#endif
 #ifdef __cplusplus
 }
 #endif
 #endif /* HCID_H */
 
 #ifdef HCID_IMPLEMENTATION
+#ifndef HCID_ENCODER_ONLY
 #include <math.h>
+#endif
 #include <string.h>
 
 #define HCID__SPB (8000.0 / 1200.0)
@@ -76,6 +89,7 @@ uint32_t hcid_golay_encode(uint32_t data12) {
     return (cw23 << 1) | p;
 }
 
+#ifndef HCID_ENCODER_ONLY
 static uint32_t hcid__syndrome(uint32_t w) { return (w & 0xFFF) ^ (hcid_golay_encode(w >> 12) & 0xFFF); }
 
 static int32_t hcid__table[4096];
@@ -99,6 +113,7 @@ int hcid_golay_decode(uint32_t w) {
     int32_t e = hcid__table[hcid__syndrome(w & 0xFFFFFF)];
     return e < 0 ? -1 : (int)(((w & 0xFFFFFF) ^ (uint32_t)e) >> 12);
 }
+#endif /* !HCID_ENCODER_ONLY */
 
 static int hcid__valid(const char *t, int type) {
     int n = (int)strlen(t);
@@ -146,6 +161,15 @@ static int hcid__frame_bits(const char *t, int type, uint8_t *bits) {
     return m;
 }
 
+int hcid_frame_bits(const char *text, int type, uint8_t *bits, int cap) {
+    uint8_t tmp[HCID_MAX_BITS];
+    int m = hcid__frame_bits(text, type, tmp);
+    if (!m || m > cap) return 0;
+    memcpy(bits, tmp, (size_t)m);
+    return m;
+}
+
+#ifndef HCID_ENCODER_ONLY
 int hcid_frame_samples(const char *text) {
     uint8_t bits[24 + 16 + 32 + 24 * HCID__MAXW + 2];
     int m = hcid__frame_bits(text, HCID_TYPE_CALLSIGN, bits);
@@ -281,4 +305,5 @@ int hcid_demodulate(const int16_t *pcm, int n, float *d, hcid_hit_fn cb, void *u
     }
     return hits;
 }
+#endif /* !HCID_ENCODER_ONLY */
 #endif /* HCID_IMPLEMENTATION */
