@@ -25,10 +25,6 @@ class ProxyTest(unittest.TestCase):
         self.assertEqual(parse_set_info(set_info(2130035, "C31AG", 213, 2)), (2130035, 213, "C31AG"))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class HbpRelayTest(unittest.TestCase):
     def test_dmra_packets_layout(self):
         from hamcid.usrp_proxy import dmra_packets
@@ -169,3 +165,28 @@ class HintTest(unittest.TestCase):
         self.assertEqual(p.ta_for_stream(), "C31AG/LoRa")   # nodo con pista: alias desde el principio
         p.up_call = "EA3XYZ"                                # una ráfaga manda sobre la pista
         self.assertEqual(p.ta_for_stream(), "EA3XYZ/ASL")
+
+    def test_drop_src(self):
+        import socket
+        from hamcid.usrp_proxy import HbpRelay
+        r = HbpRelay("127.0.0.1:0", "127.0.0.1:1", lambda: None, False, frozenset({1000001}))
+        rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        rx.bind(("127.0.0.1", 0))
+        rx.settimeout(0.3)
+        r.bridge = rx.getsockname()
+
+        def pk(src):
+            return (b"DMRD\x00" + src.to_bytes(3, "big") + (213).to_bytes(3, "big") + bytes(4)
+                    + b"\x80" + bytes.fromhex("11223344") + bytes(33))
+        try:
+            r.from_master(pk(1000001))
+            with self.assertRaises(socket.timeout):
+                rx.recv(100)                              # baliza del sistema: no pasa
+            r.from_master(pk(2130035))
+            self.assertEqual(rx.recv(100)[5:8], (2130035).to_bytes(3, "big"))
+        finally:
+            rx.close(); r.local.close(); r.up.close()
+
+
+if __name__ == "__main__":
+    unittest.main()

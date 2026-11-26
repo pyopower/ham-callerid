@@ -103,6 +103,7 @@ WantedBy=multi-user.target
 | `--unknown-ta` | alias when the talker is unknown |
 | `--ami host:port,user,secretfile`, `--node`, `--bridge-node` | ask app_rpt which link is keyed (EchoLink / IAX / node) |
 | `--delay` | ASL → DMR audio delay in ms (time to find and remove the burst), default 300, 400 recommended |
+| `--drop-src id[,id…]` | needs the HBP relay: calls from these DMR source IDs are not passed to ASL (e.g. the network's system ID used for beacons and announcements). Empty by default |
 | `--dmra` | also send HBP `DMRA` packets. **Off by default**: HBlink masters answer them with NAK and the peer reconnects |
 | `--real-id`, `--allow` | put the callsign's real DMR ID (not recommended until bursts are signed) |
 

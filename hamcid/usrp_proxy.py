@@ -101,7 +101,8 @@ class HbpRelay:
     inyectan cuentan como del peer. ``ta_for_stream()`` da el texto para cada llamada nueva.
     """
 
-    def __init__(self, listen: str, master: str, ta_for_stream, dmra: bool = False):
+    def __init__(self, listen: str, master: str, ta_for_stream, dmra: bool = False,
+                 drop_src: frozenset = frozenset()):
         self.local = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.local.bind(_addr(listen))
         self.up = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -113,6 +114,8 @@ class HbpRelay:
         self.injector = dmr_ta.TaInjector()
         self.dmra = dmra
         self.pending: tuple[bytes, bytes, float] | None = None   # (stream, rf_src, desde) esperando indicativo
+        self.drop_src = drop_src          # orígenes DMR que no se pasan hacia ASL (balizas del sistema)
+        self.dropped = collections.OrderedDict()
 
     def _resolve(self):
         h, p = _addr(self.master_name)
@@ -166,6 +169,17 @@ class HbpRelay:
         log.info("HBP: Talker Alias «%s» en la llamada %s%s", text, sid.hex(), f" ({why})" if why else "")
 
     def from_master(self, d: bytes, addr=None):
+        if self.drop_src and d[:4] == b"DMRD" and len(d) >= 20:
+            src = int.from_bytes(d[5:8], "big")
+            if src in self.drop_src:
+                sid = d[16:20]
+                if sid not in self.dropped:
+                    self.dropped[sid] = True
+                    while len(self.dropped) > 16:
+                        self.dropped.popitem(last=False)
+                    log.info("HBP: llamada %s de %d a TG %d descartada (--drop-src)", sid.hex(), src,
+                             int.from_bytes(d[8:11], "big"))
+                return
         if self.bridge:
             self.local.sendto(d, self.bridge)
 
@@ -376,7 +390,7 @@ class Proxy:
         self.last_asl_audio = 0.0
         self.last_seq = None
         self.last_asl_n = -1000
-        self.hbp = HbpRelay(a.hbp_listen, a.hbp_master, self.ta_for_stream, a.dmra) if a.hbp_listen else None
+        self.hbp = HbpRelay(a.hbp_listen, a.hbp_master, self.ta_for_stream, a.dmra, a.drop_src) if a.hbp_listen else None
         self.ami = None
         if a.ami:
             host, user, secret_file = a.ami.split(",")
@@ -677,8 +691,11 @@ def main(argv=None):
     p.add_argument("--real-id", action="store_true", help="poner el ID DMR real del indicativo (solo "
                    "para ráfagas verificadas; hoy sin firma: desaconsejado)")
     p.add_argument("--allow", default="", help="con --real-id: indicativos que pueden salir con su ID real")
+    p.add_argument("--drop-src", default="", help="relevo HBP: IDs DMR de origen (separados por comas) "
+                   "cuyas llamadas no se pasan hacia ASL, p. ej. 1000001 = balizas/anuncios del sistema")
     p.add_argument("-v", "--verbose", action="store_true")
     a = p.parse_args(argv)
+    a.drop_src = frozenset(int(x) for x in a.drop_src.split(",") if x.strip())
     a.allow = {c.strip().upper() for c in a.allow.split(",") if c.strip()}
     logging.basicConfig(level=logging.DEBUG if a.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
